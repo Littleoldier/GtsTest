@@ -66,7 +66,7 @@
 ```csharp
 // true = 模拟运行（无需硬件） / false = 连接真实控制卡
 GtsModel.UseSimulation = true;
-
+```
 ###3. 编译与启动
 环境要求：Visual Studio 2022+ 或 .NET 8.0 SDK
 
