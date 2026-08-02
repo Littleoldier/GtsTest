@@ -67,33 +67,54 @@
 // true = 模拟运行（无需硬件） / false = 连接真实控制卡
 GtsModel.UseSimulation = true;
 
-3. 编译与启动
+###3. 编译与启动
 环境要求：Visual Studio 2022+ 或 .NET 8.0 SDK
 
 编译后运行，点击 “初始化” 按钮建立连接，选择轴号即可开始监控或执行工作流
 
-4. 工作流配置
-在 Workflows/ 目录下新建 .json 文件，参考以下格式：
+###4. 工作流配置
+在 Workflows/ 目录下新建 .json 文件，程序启动时会自动扫描并显示在下拉列表中。
+
+📄 示例 1：简单往返（SimpleMove.json）
 {
-  "Name": "示例流程",
-  "Description": "回零 -> 定位 -> 等待IO -> 定位 -> 延时",
+  "Name": "简单往返",
+  "Description": "走到20000 -> 延时 -> 回到0",
   "Commands": [
-    { "Type": "Home", "Axis": 1, "HomePos": 0 },
-    { "Type": "MoveAbs", "Axis": 1, "TargetPos": 10000, "Vel": 10, "Acc": 5 },
-    { "Type": "WaitIO", "IoIndex": 0, "ExpectValue": true },
-    { "Type": "MoveAbs", "Axis": 1, "TargetPos": 5000 },
+    { "Type": "MoveAbs", "Axis": 1, "TargetPos": 20000, "Vel": 30, "Acc": 15 },
+    { "Type": "Delay", "DelayMs": 300 },
+    { "Type": "MoveAbs", "Axis": 1, "TargetPos": 0, "Vel": 20, "Acc": 10 }
+  ]
+}
+
+📄 示例 2：标准回零定位流程（StandardFlow.json）
+{
+  "Name": "标准回零定位流程",
+  "Description": "回零 -> 走到10000 -> 等待IO0 -> 走到5000 -> 延时500ms",
+  "Commands": [
+    { "Type": "Home", "Axis": 1, "HomePos": 0, "Vel": 20, "Acc": 10 },
+    { "Type": "MoveAbs", "Axis": 1, "TargetPos": 10000, "Vel": 15, "Acc": 8 },
+    { "Type": "WaitIO", "IoIndex": 0, "ExpectValue": true, "TimeoutMs": 3000 },
+    { "Type": "MoveAbs", "Axis": 1, "TargetPos": 5000, "Vel": 10, "Acc": 5 },
     { "Type": "Delay", "DelayMs": 500 }
   ]
 }
 
-📁 目录结构
+📋 支持的指令类型
+指令类型		参数				  说明
+Home	      Axis, HomePos, Vel, Acc		执行回零，到达 HomePos 位置
+MoveAbs	      Axis, TargetPos, Vel, Acc		       绝对定位到目标位置
+WaitIO	   IoIndex, ExpectValue, TimeoutMs	等待指定 IO 输入达到期望值（支持超时）
+Delay	  	DelayMs			        延时等待（毫秒）
+
+
+###📁 目录结构
 GtsTest/
 ├── GtsModel.cs              		# 核心数据模型（封装固高 API + 模拟器实现）
 ├── GtsController.cs         		# 控制器（事件订阅、线程调度、工作流路由）
 ├── Form1.cs                 		# 主视图（UI 控件与事件暴露）
 ├── Form1.Designer.cs        		# 视图设计器文件
 ├── FileLogger.cs            		# 日志落盘工具（线程安全）
-├── Commands/                		# 命令模式实现
+├── Commands/                	 	# 命令模式实现
 │   ├── IMotionCommand.cs    	# 命令接口
 │   ├── MotionCommandBase.cs 	# 命令基类（模板方法）
 │   ├── HomeCommand.cs       	# 回零指令
@@ -104,16 +125,20 @@ GtsTest/
 │   ├── CommandConfig.cs     		# JSON 配置模型
 │   ├── CommandFactory.cs    		# 命令工厂
 │   └── WorkflowConfig.cs    		# 工作流配置模型
-├── Workflows/               		# JSON 工作流配置文件存放目录（自动生成）
+├── Workflows/               		# JSON 工作流配置文件存放目录
+│   ├── SimpleMove.json      		# 示例：简单往返
+│   └── StandardFlow.json    		# 示例：标准回零定位流程
 ├── Images/                  		# 文档用截图（main.png, test.png）
 └── Logs/                    		# 运行时日志目录（自动生成）
 
-🚀 未来规划
+
+###🚀 未来规划
 1、增加 PVT / 插补运动的高级配置界面
 2、完善 JSON 工作流的错误校验与断点续跑功能
+3、支持多轴联动轨迹的实时速度倍率调整（Override）
 
-⚠️ 注意事项
+###⚠️ 注意事项
 1、真实模式下操作设备请务必注意安全限位，避免机械碰撞。
 2、模拟模式数据仅用于 UI 演示和逻辑验证，与实际物理反馈无关。
 3、切换模拟/真实模式后，必须重新点击“初始化” 才能生效。
-4、工作流 JSON 文件需放置在 Workflows/ 目录下，程序启动时会自动扫描并填充下拉列表
+4、工作流 JSON 文件需放置在 Workflows/ 目录下，程序启动时会自动扫描并填充下拉列表。
