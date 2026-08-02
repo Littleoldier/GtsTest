@@ -67,14 +67,14 @@
 // true = 模拟运行（无需硬件） / false = 连接真实控制卡
 GtsModel.UseSimulation = true;
 ```
-###3. 编译与启动
+### 3. 编译与启动
 环境要求：Visual Studio 2022+ 或 .NET 8.0 SDK
 
 编译后运行，点击 “初始化” 按钮建立连接，选择轴号即可开始监控或执行工作流
 
-###4. 工作流配置
+### 4. 工作流配置
 在 Workflows/ 目录下新建 .json 文件，程序启动时会自动扫描并显示在下拉列表中。
-
+```csharp
 📄 示例 1：简单往返（SimpleMove.json）
 {
   "Name": "简单往返",
@@ -99,12 +99,15 @@ GtsModel.UseSimulation = true;
   ]
 }
 
+```
+
 📋 支持的指令类型
-指令类型		参数				  说明
-Home	      Axis, HomePos, Vel, Acc		执行回零，到达 HomePos 位置
-MoveAbs	      Axis, TargetPos, Vel, Acc		       绝对定位到目标位置
-WaitIO	   IoIndex, ExpectValue, TimeoutMs	等待指定 IO 输入达到期望值（支持超时）
-Delay	  	DelayMs			        延时等待（毫秒）
+| 指令类型 | 参数 | 说明 | 
+| :--- | :--- |:--- | 
+| `Home` | Axis, HomePos, Vel, Acc  | 执行回零，到达 HomePos 位置  |
+| `MoveAbs` | Axis, TargetPos, Vel, Acc | 绝对定位到目标位置  |
+| `WaitIO` | IoIndex, ExpectValue, TimeoutMs | 等待指定 IO 输入达到期望值（支持超时） |
+| `Delay` | DelayMs | 延时等待（毫秒） |
 
 
 ###📁 目录结构
