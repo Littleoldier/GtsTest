@@ -34,10 +34,10 @@ namespace GtsTest
             _view = view;
 
             // 订阅 View 的事件
-            _view.OpenRequested += OnOpenRequested;
+            _view.OpenRequested += OnOpenRequested;                             //开启设备
+            _view.CloseDeviceRequested += OnCloseDeviceRequested;               //关闭设备
             _view.ClearRequested += OnClearRequested;
             _view.GetStatusRequested += OnGetStatusRequested;
-           
             _view.RunWorkflowRequested += OnRunWorkflowRequested;               // 工作流
 
             _view.StartMonitorRequested += (s, e) => StartMonitoring(100);      // 100ms 周期
@@ -423,7 +423,22 @@ namespace GtsTest
                 _view.ShowError($"获取轴信息异常: {ex.Message}" ,"Operation");
             }
         }
+        //关闭设备
+        private void OnCloseDeviceRequested(object? sender, EventArgs e)
+        {
+            // 1. 停止所有后台任务（监控线程和工作流）
+            StopMonitoring();
+            _workflowCts?.Cancel();
 
+            // 2. 释放硬件资源（真实模式下会调用 GT_Close）
+            _model.CloseDevice();
+
+            // 3. 清空日志并给用户反馈
+            _view.ClearResult();
+            _view.ShowResult("⏹ 设备已关闭，硬件资源已释放。");
+
+            // 4. 可选：更新 UI 状态（如按钮颜色、提示等），但当前无需额外操作
+        }
         private string ParseAxisStatus(int status)
         {
             var sb = new StringBuilder();

@@ -8,6 +8,7 @@ namespace GtsTest
     {
         // 定义事件，由 Controller 订阅
         public event EventHandler OpenRequested;                    //打开设备
+        public event EventHandler CloseDeviceRequested;             //关闭设备
         public event EventHandler ClearRequested;                   //清空信息栏
         public event EventHandler GetStatusRequested;               //获取状态轴信息
         public event EventHandler StartMonitorRequested;            //开启监控
@@ -24,6 +25,7 @@ namespace GtsTest
             SetSimulationModeUI(GtsModel.UseSimulation);                        //设定模式
             // 绑定 UI 事件到内部触发方法
             btnOpen.Click += (s, e) => OnOpenRequested();                       //开启设备
+            btnCloseDevice.Click += (s, e) => OnCloseDeviceRequested();         //关闭设备
             btnClear.Click += (s, e) => OnClearRequested();                     //清空消息栏
             btnGetStatus.Click += (s, e) => OnGetStatusRequested();             //获取轴状态信息
             btnStartMonitor.Click += (s, e) => OnStartMonitorRequested();       //实时监控
@@ -36,6 +38,8 @@ namespace GtsTest
 
         // 触发打开事件
         private void OnOpenRequested() => OpenRequested?.Invoke(this, EventArgs.Empty);
+        // 触发关闭事件
+        private void OnCloseDeviceRequested() => CloseDeviceRequested?.Invoke(this, EventArgs.Empty);
         // 触发清空事件
         private void OnClearRequested() => ClearRequested?.Invoke(this, EventArgs.Empty);
         // 获取状态轴事件

@@ -38,6 +38,7 @@
             btnStopMonitor = new Button();
             btnGetStatus = new Button();
             numAxis = new NumericUpDown();
+            btnCloseDevice = new Button();
             splitContainer1 = new SplitContainer();
             txtOperationLog = new TextBox();
             panel1 = new Panel();
@@ -66,6 +67,7 @@
             flowLayoutPanel1.Controls.Add(btnStopMonitor);
             flowLayoutPanel1.Controls.Add(btnGetStatus);
             flowLayoutPanel1.Controls.Add(numAxis);
+            flowLayoutPanel1.Controls.Add(btnCloseDevice);
             flowLayoutPanel1.Dock = DockStyle.Top;
             flowLayoutPanel1.Location = new Point(0, 0);
             flowLayoutPanel1.Margin = new Padding(25, 3, 25, 3);
@@ -157,6 +159,7 @@
             // 
             numAxis.Font = new Font("Microsoft YaHei UI", 14.25F, FontStyle.Regular, GraphicsUnit.Point, 134);
             numAxis.Location = new Point(357, 39);
+            numAxis.Margin = new Padding(3, 3, 45, 3);
             numAxis.Maximum = new decimal(new int[] { 8, 0, 0, 0 });
             numAxis.Minimum = new decimal(new int[] { 1, 0, 0, 0 });
             numAxis.Name = "numAxis";
@@ -164,6 +167,15 @@
             numAxis.Size = new Size(120, 32);
             numAxis.TabIndex = 16;
             numAxis.Value = new decimal(new int[] { 1, 0, 0, 0 });
+            // 
+            // btnCloseDevice
+            // 
+            btnCloseDevice.Location = new Point(525, 39);
+            btnCloseDevice.Name = "btnCloseDevice";
+            btnCloseDevice.Size = new Size(90, 29);
+            btnCloseDevice.TabIndex = 17;
+            btnCloseDevice.Text = "关闭设备";
+            btnCloseDevice.UseVisualStyleBackColor = true;
             // 
             // splitContainer1
             // 
@@ -287,5 +299,6 @@
         private TextBox txtMonitorLog;
         private Panel panel2;
         private Label label2;
+        private Button btnCloseDevice;
     }
 }
