@@ -31,7 +31,7 @@ namespace GtsTest.Commands
             var sw = System.Diagnostics.Stopwatch.StartNew();
             while (!arrived && sw.ElapsedMilliseconds < 5000)
             {
-                ct.ThrowIfCancellationRequested();
+                ct.ThrowIfCancellationRequested();//响应退出
                 _model.GetPrfPos(_axis, out currentPos, out clk);
                 arrived = Math.Abs(currentPos - _targetPos) < 5;
                 Thread.Sleep(20);

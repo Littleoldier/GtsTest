@@ -1,9 +1,11 @@
 ﻿using gts;
-using System;
-using System.Text;
-using System.IO;
-using System.Text.Json;
 using GtsTest.Commands;   // 引用新建的 Commands 文件夹里的所有指令
+using GtsTest.Modbus;
+using System;
+using System.Collections.Concurrent;
+using System.IO;
+using System.Text;
+using System.Text.Json;
 
 
 namespace GtsTest
@@ -15,6 +17,7 @@ namespace GtsTest
     }
     public class GtsController
     {
+        private ModbusConfig _modbusConfig;
         private readonly GtsModel _model;
         private readonly Form1 _view;
 
@@ -22,16 +25,30 @@ namespace GtsTest
         private CancellationTokenSource? _cts;
         private readonly object _lock = new object();
 
+        private ModbusClient _modbusClient;
+
         // ========== 工作流相关字段  ==========
         private CancellationTokenSource? _workflowCts;     // 用于取消正在运行的工作流
         private readonly object _workflowLock = new object(); // 防止用户狂点“启动”按钮导致线程爆炸
-
         public event EventHandler<SimulationModeChangedEventArgs>? SimulationModeChanged;   //切换模式事件
 
         public GtsController(GtsModel model, Form1 view)
         {
             _model = model;
             _view = view;
+            _modbusConfig = new ModbusConfig();   // ← 关键
+
+            AppLogger.OnLogReceived += (level, logLine, category) =>
+            {
+                _view.BeginInvoke(new Action(() =>
+                {
+                    // 根据类别分流：Modbus 和 Monitor 类放监控日志，其余放操作日志
+                    if (category == "Monitor" || category == "Modbus")
+                        _view.AppendMonitorLog(logLine);  // 直接显示带时间戳的整行
+                    else
+                        _view.ShowResult(logLine);        // 直接显示带时间戳的整行
+                }));
+            };
 
             // 订阅 View 的事件
             _view.OpenRequested += OnOpenRequested;                             //开启设备
@@ -48,7 +65,38 @@ namespace GtsTest
                 // 确保 UI 更新在主线程执行（因为事件可能在后台线程触发，但 ToggleSimulationMode 是在主线程调用的，所以这里不 Invoke 也可）
                 _view.SetSimulationModeUI(e.IsSimulationMode);
             };
+            _view.ToggleModbusRequested += _view_ToggleModbusRequested;
+            _view.ModbusConfigChanged += (s, config) =>
+            {
+                _modbusConfig = config;
+            };
+            _modbusClient = new ModbusClient(_modbusConfig);
+            _modbusClient.ConnectionStateChanged += OnModbusConnectionChanged;
+            //_view.ModbusReconnectRequested += OnModbusReconnectRequested;
+            //_modbusClient.Reconnect(_modbusConfig.IpAddress, _modbusConfig.Port);
+            _view.WriteRegisterRequested += OnWriteRegisterRequested;
+            _view.WriteCoilRequested += OnWriteCoilRequested;
 
+            CyclicMonitorBuffer.SetMaxSize(30000); // 设置监控缓存容量
+        }
+
+        private void _view_ToggleModbusRequested(object? sender, EventArgs e)
+        {
+            if (_modbusClient.IsConnected)
+            {
+                // 已连接 → 断开
+                _modbusClient.Disconnect();
+                // 注意：Disconnect() 会触发 ConnectionStateChanged 事件，
+                // 进而调用 UpdateModbusStatus，UI 会自动更新
+            }
+            else
+            {
+                bool success = _modbusClient.Reconnect(_modbusConfig);
+                if (success)
+                    AppLogger.Info($"✅ Modbus 已连接至 {_modbusConfig.IpAddress}:{_modbusConfig.Port}", "Operation");
+                else
+                    AppLogger.Error("❌ Modbus 连接失败", "Operation");
+            }
         }
 
         // 处理“打开”请求
@@ -60,7 +108,7 @@ namespace GtsTest
                 short openResult = _model.OpenDevice(0, 1);  // 注意这里改成 short
                 if (openResult != 0)
                 {
-                    _view.ShowResult($"❌ 打开设备失败\n错误码: {openResult} (0x{openResult:X})" + Environment.NewLine + GetErrorMessage(openResult));
+                    AppLogger.Error($"❌ 打开设备失败 | 错误码: {openResult} (0x{openResult:X}) | {GetErrorMessage(openResult)}","Operation");
                     return; // 打开失败，直接退出，不再执行复位
                 }
 
@@ -68,19 +116,19 @@ namespace GtsTest
                 short resetResult = _model.GT_Reset();
                 if (resetResult == 0)
                 {
-                    _view.ShowResult($"✅ 初始化成功\n打开返回值: 0\n复位返回值: 0 (成功)");
+                    AppLogger.Info($"✅ 初始化成功 | 打开返回值: 0 | 复位返回值: 0 (成功)","Operation");
                 }
                 else
                 {
                     // 注意：虽然复位失败，但设备其实已经打开了，所以显示警告而非纯粹的错误
-                    _view.ShowResult($"⚠️ 设备已打开，但复位失败\n打开返回值: 0\n复位错误码: {resetResult} (0x{resetResult:X})" + Environment.NewLine + GetErrorMessage(resetResult));
+                   AppLogger.Warn($"⚠️ 设备已打开，但复位失败 | 打开返回值: 0 | 复位错误码: {resetResult} (0x{resetResult:X}) | {GetErrorMessage(resetResult)}", "Operation");
                     return;
                 }
 
             }
             catch (Exception ex)
             {
-                _view.ShowError($"调用异常: {ex.Message}", "Operation");
+                AppLogger.Error($"调用异常: {ex.Message}", "Operation");
             }
         }
 
@@ -95,7 +143,7 @@ namespace GtsTest
                 // 防止重复启动导致线程爆炸
                 if (_pollingThread != null && _pollingThread.IsAlive)
                 {
-                    _view.ShowResult("⚠️ 监控线程已在运行中");
+                    AppLogger.Warn("⚠️ 监控线程已在运行中","Operation");
                     return;
                 }
 
@@ -108,7 +156,7 @@ namespace GtsTest
                     IsBackground = true // 如果主窗口意外关闭，它不会阻止进程退出
                 };
                 _pollingThread.Start();
-                _view.ShowResult($"✅ 实时监控已启动 (周期: {intervalMs}ms)");
+                AppLogger.Info($"✅ 实时监控已启动 (周期: {intervalMs}ms)","Operation");
             }
         }
 
@@ -125,7 +173,7 @@ namespace GtsTest
                 _pollingThread?.Join(200); // 等待最多200ms让线程自己结束
                 _pollingThread = null;
                 _cts = null;
-                _view.ShowResult("⏹ 实时监控已停止");
+                AppLogger.Info("⏹ 实时监控已停止","Operation");
             }
             // 停止监控时，顺便把正在运行的工作流也干掉
             _workflowCts?.Cancel();
@@ -136,7 +184,7 @@ namespace GtsTest
         /// </summary>
         private void PollingLoop(int interval, CancellationToken ct)
         {
-            var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+            var stopwatch = System.Diagnostics.Stopwatch.StartNew();//计时基准：使用 Stopwatch 记录启动后的毫秒数，以计算本周期应结束的时间点。
 
             while (!ct.IsCancellationRequested)
             {
@@ -148,7 +196,7 @@ namespace GtsTest
                 short axis = 1;
                 _view.Invoke(new Action(() => { axis = _view.SelectedAxis; }));
 
-                // 获取各项数据（调用你的 GtsModel）
+                // 获取各项数据（调用 GtsModel）
                 int status = 0;
                 uint clk = 0;
                 double pos = 0, vel = 0, acc = 0;
@@ -160,12 +208,33 @@ namespace GtsTest
                 _model.GetPrfAcc(axis, out acc, out clk);
                 _model.GetPrfMode(axis, out mode, out clk);
 
+                string timeStamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff");
+                string dataLine = $"[{timeStamp}] 轴[{axis}] 实时 -> 位置:{pos:F2} | 速度:{vel:F2} | 状态:0x{status:X}";
+
+                // 2. 存入循环内存缓冲区（无 I/O 操作）
+                CyclicMonitorBuffer.Log(dataLine);
                 // 3. 跨线程更新 UI（使用 BeginInvoke，不阻塞工作线程）
                 _view.BeginInvoke(new Action(() =>
                 {
                     // 这里只做显示，不写复杂逻辑
-                    _view.AppendMonitorLog($"轴[{axis}] 实时 -> 位置:{pos:F2} | 速度:{vel:F2} | 状态码:0x{status:X}");
+                    _view.AppendMonitorLog(dataLine);
                 }));
+
+                // 读取 Modbus 数据
+                var result = _modbusClient.ReadHoldingRegistersWithRaw(_modbusConfig.StartAddress,_modbusConfig.RegisterCount);
+                if (result != null)
+                {
+                    string hexStr = string.Join(", ", result.RawRegisters.Select(r => $"0x{r:X4}"));
+                    string display = ModbusFormatter.Format(result.ConvertedValue,_modbusConfig.DisplayFormat,_modbusConfig.ByteOrder);
+
+                    // 输出到 UI 和缓冲区
+                    string hexStrLine = $"[{timeStamp}]原始寄存器: {hexStr}";
+                    string rawValuesLine = $"[{timeStamp}]Modbus数据: {display}";
+                    _view.BeginInvoke(new Action(() => _view.AppendMonitorLog(hexStrLine)));
+                    _view.BeginInvoke(new Action(() => _view.AppendMonitorLog(rawValuesLine)));
+                    CyclicMonitorBuffer.Log(hexStrLine);
+                    CyclicMonitorBuffer.Log(rawValuesLine);
+                }
 
                 // 4. 精确等待到下一个周期（补偿 Sleep 误差）
                 long now = stopwatch.ElapsedMilliseconds;
@@ -177,6 +246,83 @@ namespace GtsTest
             }
         }
         #endregion
+
+        private void OnWriteRegisterRequested(object? sender, WriteRegisterEventArgs e)
+        {
+            try
+            {
+                // 1. 将值编码为 ushort[]（使用 ModbusClient.EncodeValue）
+                ushort[] raw = ModbusClient.EncodeValue(e.Values, e.DataType, e.ByteOrder);
+                if (raw.Length == 0)
+                {
+                    AppLogger.Warn("写入数据为空", "Operation");
+                    return;
+                }
+
+                // 2. 根据数据长度选择写入方法
+                bool success;
+                if (raw.Length == 1 && (e.DataType == DataType.Int16 || e.DataType == DataType.UInt16))
+                {
+                    // 单寄存器写入
+                    success = _modbusClient.WriteSingleRegister(e.Address, raw[0]);
+                }
+                else
+                {
+                    // 多寄存器写入
+                    success = _modbusClient.WriteMultipleRegisters(e.Address, raw);
+                }
+
+                if (success)
+                    AppLogger.Info($"✅ 寄存器写入成功: 地址={e.Address}, 值={string.Join(",", e.Values)}", "Operation");
+                else
+                    AppLogger.Error($"❌ 寄存器写入失败: 地址={e.Address}", "Operation");
+            }
+            catch (Exception ex)
+            {
+                AppLogger.Error($"❌ 寄存器写入异常: {ex.Message}", "Operation");
+            }
+        }
+
+        private void OnWriteCoilRequested(object? sender, WriteCoilEventArgs e)
+        {
+            try
+            {
+                bool success = _modbusClient.WriteSingleCoil(e.Address, e.Value);
+                if (success)
+                    AppLogger.Info($"✅ 线圈写入成功: 地址={e.Address}, 值={e.Value}", "Operation");
+                else
+                    AppLogger.Error($"❌ 线圈写入失败: 地址={e.Address}", "Operation");
+            }
+            catch (NModbus.SlaveException ex)
+            {
+                // 功能码 133 (0x85) 表示异常响应，异常码 1 表示不支持该功能
+                if (ex.FunctionCode == 133 && ex.SlaveExceptionCode == 1)
+                    AppLogger.Error($"❌ 从机不支持写线圈功能 (功能码 0x05)。如需控制数字量输出，请尝试使用“写寄存器”并操作相应位。", "Operation");
+                else
+                    AppLogger.Error($"❌ 线圈写入异常: 功能码={ex.FunctionCode}, 异常码={ex.SlaveExceptionCode}", "Operation");
+            }
+            catch (Exception ex)
+            {
+                AppLogger.Error($"❌ 线圈写入异常: {ex.Message}", "Operation");
+            }
+        }
+
+        private void OnModbusConnectionChanged(object? sender, ModbusConnectionEventArgs e)
+        {
+            // 检查 Handle 是否已创建，若未创建则放弃此次 UI 更新（后续事件会再次触发）
+            if (!_view.IsHandleCreated)
+            {
+                // 可以选择在此处将状态暂存，或直接忽略，因为连接状态改变事件会再次触发
+                return;
+            }
+
+            // 必须使用 BeginInvoke 跨线程安全更新 UI
+            _view.BeginInvoke(new Action(() =>
+            {
+                // 调用 Form1 中刚刚写好的更新方法（更新指示灯和显示错误）
+                _view.UpdateModbusStatus(e.IsConnected, _modbusConfig, e.ErrorMessage);
+            }));
+        }
 
         #region 工作流执行逻辑
         // ========== 工作流执行逻辑  ==========
@@ -202,17 +348,17 @@ namespace GtsTest
                         // JSON 存在但解析失败（格式错误），此时不降级，让用户去检查 JSON 格式
                         // 但为了防止卡死，我们可以选择直接 return，或者提示错误后走降级。
                         // 为了面试更稳，这里可以改成：如果解析失败，提示并继续走默认。
-                        _view.ShowResult("⚠️ JSON 解析失败，将自动切换至默认硬编码流程");
+                        AppLogger.Warn("⚠️ JSON 解析失败，将自动切换至默认硬编码流程", "Operation");
                     }
                 }
                 else
                 {
-                    _view.ShowResult($"⚠️ 未找到文件 {selected}.json，将自动切换至默认硬编码流程");
+                    AppLogger.Warn($"⚠️ 未找到文件 {selected}.json，将自动切换至默认硬编码流程", "Operation");
                 }
             }
             else
             {
-                _view.ShowResult("⚠️ 未选择工作流，将自动切换至默认硬编码流程");
+                AppLogger.Warn("⚠️ 未选择工作流，将自动切换至默认硬编码流程", "Operation");
             }
 
             // ========= 策略 2：降级执行默认硬编码（保底方案） =========
@@ -241,7 +387,7 @@ namespace GtsTest
                 var delay = new DelayCommand(_model, delayMs: 500);
 
                 var workflow = new SequenceCommand(home, move1, waitIO, move2, delay);
-                workflow.OnLog += msg => _view.BeginInvoke(new Action(() => _view.ShowResult(msg)));
+                workflow.OnLog += msg => _view.BeginInvoke(new Action(() => AppLogger.Info(msg)));
 
                 var thread = new Thread(() => workflow.Execute(token))
                 {
@@ -250,7 +396,7 @@ namespace GtsTest
                 };
                 thread.Start();
 
-                _view.ShowResult("🚀 已启动【默认硬编码工作流】(回零->定位10000->等待IO->定位5000->延时)");
+                AppLogger.Info("🚀 已启动【默认硬编码工作流】(回零->定位10000->等待IO->定位5000->延时)", "Operation");
             }
         }
         #endregion
@@ -272,8 +418,8 @@ namespace GtsTest
             // 第四步：清空界面日志，给用户明确反馈
             _view.ClearResult();
             string modeStatus = GtsModel.UseSimulation ? "✅ 模拟器已开启 (无硬件依赖)" : "✅ 真实硬件模式已开启 (连接实际控制卡)";
-            _view.ShowResult(modeStatus);
-            _view.ShowResult("⚠️ 请点击【初始化】重新建立连接以生效");
+            AppLogger.Info(modeStatus, "Operation");
+            AppLogger.Info("⚠️ 请点击【初始化】重新建立连接以生效", "Operation");
 
             // 第五步：更新按钮文字（让用户知道当前状态）
             // 触发事件，通知所有View模式已改变
@@ -289,14 +435,14 @@ namespace GtsTest
         {
             if (config == null || config.Commands == null || config.Commands.Count == 0)
             {
-                _view.ShowResult("❌ 无效的工作流配置");
+                AppLogger.Error("❌ 无效的工作流配置", "Operation");
                 return;
             }
 
             lock (_workflowLock)
             {
-                _workflowCts?.Cancel();
-                _workflowCts = new CancellationTokenSource();
+                _workflowCts?.Cancel();//是否存在，若存在则立刻发出撤退消息，若不存在则跳过
+                _workflowCts = new CancellationTokenSource();//新建一个取消发射器
                 var token = _workflowCts.Token;
 
                 var commands = new List<IMotionCommand>();
@@ -309,7 +455,7 @@ namespace GtsTest
                 }
 
                 var workflow = new SequenceCommand(commands.ToArray());
-                workflow.OnLog += msg => _view.BeginInvoke(new Action(() => _view.ShowResult(msg)));
+                workflow.OnLog += msg => _view.BeginInvoke(new Action(() => AppLogger.Info(msg)));
 
                 var thread = new Thread(() => workflow.Execute(token))
                 {
@@ -318,9 +464,9 @@ namespace GtsTest
                 };
                 thread.Start();
 
-                _view.ShowResult($"🚀 已启动工作流: {config.Name} (共 {commands.Count} 个步骤)");
+                AppLogger.Info($"🚀 已启动工作流: {config.Name} (共 {commands.Count} 个步骤)", "Operation");
                 if (!string.IsNullOrEmpty(config.Description))
-                    _view.ShowResult($"📝 描述: {config.Description}");
+                    AppLogger.Info($"📝 描述: {config.Description}", "Operation");//描述步骤
             }
         }
         #endregion
@@ -333,14 +479,14 @@ namespace GtsTest
                 var config = JsonSerializer.Deserialize<WorkflowConfig>(json);
                 if (config == null || config.Commands == null || config.Commands.Count == 0)
                 {
-                    _view.ShowResult($"⚠️ 配置文件 {Path.GetFileName(filePath)} 为空或格式错误");
+                    AppLogger.Warn($"⚠️ 配置文件 {Path.GetFileName(filePath)} 为空或格式错误", "Operation");
                     return null;
                 }
                 return config;
             }
             catch (Exception ex)
             {
-                _view.ShowResult($"❌ 加载配置文件失败: {ex.Message}");
+                AppLogger.Error($"❌ 加载配置文件失败: {ex.Message}", "Operation");
                 return null;
             }
         }
@@ -359,7 +505,7 @@ namespace GtsTest
                 short AXIS = _view.SelectedAxis;   // 从界面动态获取轴号
                 if (AXIS < 1 || AXIS > 8) // 假设最多8轴
                 {
-                    _view.ShowResult("❌ 请选择有效的轴号 (1~8)");
+                    AppLogger.Warn("❌ 请选择有效的轴号 (1~8)", "Operation");
                     return;
                 }
                 uint clk = 0;
@@ -371,25 +517,25 @@ namespace GtsTest
                 short rt = _model.GetAxisStatus(AXIS, out status, out clk);
                 if (rt != 0)
                 {
-                    _view.ShowResult($"❌ 获取轴状态失败，错误码: {rt} (0x{rt:X})");
+                    AppLogger.Error($"❌ 获取轴状态失败，错误码: {rt} (0x{rt:X})", "Operation");
                     return;
                 }
 
                 rt = _model.GetPrfPos(AXIS, out pos, out clk);
                 if (rt != 0)
-                    _view.ShowResult($"⚠️ 获取规划位置失败，错误码: {rt} (0x{rt:X})");
+                    AppLogger.Warn($"⚠️ 获取规划位置失败，错误码: {rt} (0x{rt:X})", "Operation");
 
                 rt = _model.GetPrfVel(AXIS, out vel, out clk);
                 if (rt != 0)
-                    _view.ShowResult($"⚠️ 获取规划速度失败，错误码: {rt} (0x{rt:X})");
+                    AppLogger.Warn($"⚠️ 获取规划速度失败，错误码: {rt} (0x{rt:X})", "Operation");
 
                 rt = _model.GetPrfAcc(AXIS, out acc, out clk);
                 if (rt != 0)
-                    _view.ShowResult($"⚠️ 获取规划加速度失败，错误码: {rt} (0x{rt:X})");
+                    AppLogger.Warn($"⚠️ 获取规划加速度失败，错误码: {rt} (0x{rt:X})", "Operation");
 
                 rt = _model.GetPrfMode(AXIS, out mode, out clk);
                 if (rt != 0)
-                    _view.ShowResult($"⚠️ 获取运动模式失败，错误码: {rt} (0x{rt:X})");
+                    AppLogger.Warn($"⚠️ 获取运动模式失败，错误码: {rt} (0x{rt:X})", "Operation");
 
                 // 解析轴状态位（参照示例）
                 string statusMsg = ParseAxisStatus(status);
@@ -409,20 +555,21 @@ namespace GtsTest
 
                 // 组装显示信息
                 string message =
-                    $"========== 轴 {AXIS} 信息 =========={Environment.NewLine}" +
-                    $"【轴状态】{statusMsg}{Environment.NewLine}" +
-                    $"【运动模式】{modeMsg}{Environment.NewLine}" +
-                    $"【规划位置】{pos:F3} (单位){Environment.NewLine}" +
-                    $"【规划速度】{vel:F3} (单位/秒){Environment.NewLine}" +
-                    $"【规划加速度】{acc:F3} (单位/秒²){Environment.NewLine}";
-
-                _view.ShowResult(message);
+                    $"========== 轴 {AXIS} 信息 ========== | " +
+                    $"【轴状态】{statusMsg.Replace("\n", " ")} | " +
+                    $"【运动模式】{modeMsg} | " +
+                    $"【规划位置】{pos:F3} (单位) | " +
+                    $"【规划速度】{vel:F3} (单位/秒) | " +
+                    $"【规划加速度】{acc:F3} (单位/秒²)";
+                AppLogger.Info(message, "Operation");
             }
             catch (Exception ex)
             {
-                _view.ShowError($"获取轴信息异常: {ex.Message}" ,"Operation");
+                AppLogger.Error($"获取轴信息异常: {ex.Message}" ,"Operation");
             }
         }
+
+
         //关闭设备
         private void OnCloseDeviceRequested(object? sender, EventArgs e)
         {
@@ -435,7 +582,7 @@ namespace GtsTest
 
             // 3. 清空日志并给用户反馈
             _view.ClearResult();
-            _view.ShowResult("⏹ 设备已关闭，硬件资源已释放。");
+            AppLogger.Info("⏹ 设备已关闭，硬件资源已释放。", "Operation");
 
             // 4. 可选：更新 UI 状态（如按钮颜色、提示等），但当前无需额外操作
         }

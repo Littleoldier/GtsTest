@@ -14,7 +14,8 @@ namespace GtsTest
             //Application.Run(new Form1());
 
             // 初始化日志系统（放在最前面，确保任何日志输出前已准备好）
-            FileLogger.Initialize();
+            AppLogger.Initialize();         
+            AppLogger.GlobalLogLevel = LogLevel.Info;  // 可根据需要调整
 
             // ==== 启用模拟模式 ====
             GtsModel.UseSimulation = true;   // 设置为 false 则使用真实硬件

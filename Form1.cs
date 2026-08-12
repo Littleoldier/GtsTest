@@ -1,83 +1,146 @@
-using System;
+ï»¿using System;
+using System.IO.Ports;
 using System.Windows.Forms;
+using System.Xml.XPath;
+using GtsTest.Modbus;
 
 namespace GtsTest
 {
 
     public partial class Form1 : Form
     {
-        // ¶¨ÒåÊÂ¼ş£¬ÓÉ Controller ¶©ÔÄ
-        public event EventHandler OpenRequested;                    //´ò¿ªÉè±¸
-        public event EventHandler CloseDeviceRequested;             //¹Ø±ÕÉè±¸
-        public event EventHandler ClearRequested;                   //Çå¿ÕĞÅÏ¢À¸
-        public event EventHandler GetStatusRequested;               //»ñÈ¡×´Ì¬ÖáĞÅÏ¢
-        public event EventHandler StartMonitorRequested;            //¿ªÆô¼à¿Ø
-        public event EventHandler StopMonitorRequested;             //Í£Ö¹¼à¿Ø
-        public event EventHandler RunWorkflowRequested;             //¹¤×÷Á÷
-        public event EventHandler ToggleSimulatorRequested;         //ÇĞ»»Ä£Ê½
+        // å®šä¹‰äº‹ä»¶ï¼Œç”± Controller è®¢é˜…
+        public event EventHandler OpenRequested;                    //æ‰“å¼€è®¾å¤‡
+        public event EventHandler CloseDeviceRequested;             //å…³é—­è®¾å¤‡
+        public event EventHandler ClearRequested;                   //æ¸…ç©ºä¿¡æ¯æ 
+        public event EventHandler GetStatusRequested;               //è·å–çŠ¶æ€è½´ä¿¡æ¯
+        public event EventHandler StartMonitorRequested;            //å¼€å¯ç›‘æ§
+        public event EventHandler StopMonitorRequested;             //åœæ­¢ç›‘æ§
+        public event EventHandler RunWorkflowRequested;             //å·¥ä½œæµ
+        public event EventHandler ToggleSimulatorRequested;         //åˆ‡æ¢æ¨¡å¼
         public string SelectedWorkflowName => cmbWorkflow.SelectedItem?.ToString() ?? "";
-
-
+        public event EventHandler ToggleModbusRequested;             //è¿æ¥/æ–­å¼€modbusè®¾å¤‡
+        public event EventHandler<ModbusConfig> ModbusConfigChanged;
+        public event EventHandler<WriteRegisterEventArgs>? WriteRegisterRequested;
+        public event EventHandler<WriteCoilEventArgs>? WriteCoilRequested;
 
         public Form1()
         {
-            InitializeComponent();                                              //³õÊ¼»¯UI
-            SetSimulationModeUI(GtsModel.UseSimulation);                        //Éè¶¨Ä£Ê½
-            // °ó¶¨ UI ÊÂ¼şµ½ÄÚ²¿´¥·¢·½·¨
-            btnOpen.Click += (s, e) => OnOpenRequested();                       //¿ªÆôÉè±¸
-            btnCloseDevice.Click += (s, e) => OnCloseDeviceRequested();         //¹Ø±ÕÉè±¸
-            btnClear.Click += (s, e) => OnClearRequested();                     //Çå¿ÕÏûÏ¢À¸
-            btnGetStatus.Click += (s, e) => OnGetStatusRequested();             //»ñÈ¡Öá×´Ì¬ĞÅÏ¢
-            btnStartMonitor.Click += (s, e) => OnStartMonitorRequested();       //ÊµÊ±¼à¿Ø
-            btnStopMonitor.Click += (s, e) => OnStopMonitorRequested();         //Í£Ö¹¼à¿Ø
-            btnRunWorkflow.Click += (s, e) => OnRunWorkflowRequested();         //´ò¿ª¹¤×÷Á÷
-            btnToggleSimulator.Click += (s, e) => OnToggleSimulatorRequested(); //ÇĞ»»Ä£Ê½
+            InitializeComponent();
+            cmbWriteDataType.SelectedIndex = 0;      
+            cmbCoilValue.SelectedIndex = 0;      // é»˜è®¤é€‰ä¸­ "ON (1)"
+            cmbByteOrder.SelectedIndex = 0;      // é»˜è®¤é€‰ä¸­ "Big Endian"
+            //åˆå§‹åŒ–UI
+            SetSimulationModeUI(GtsModel.UseSimulation);                        //è®¾å®šæ¨¡å¼
+            // ç»‘å®š UI äº‹ä»¶åˆ°å†…éƒ¨è§¦å‘æ–¹æ³•
+            btnOpen.Click += (s, e) => OnOpenRequested();                       //å¼€å¯è®¾å¤‡
+            btnCloseDevice.Click += (s, e) => OnCloseDeviceRequested();         //å…³é—­è®¾å¤‡
+            btnClear.Click += (s, e) => OnClearRequested();                     //æ¸…ç©ºæ¶ˆæ¯æ 
+            btnGetStatus.Click += (s, e) => OnGetStatusRequested();             //è·å–è½´çŠ¶æ€ä¿¡æ¯
+            btnStartMonitor.Click += (s, e) => OnStartMonitorRequested();       //å®æ—¶ç›‘æ§
+            btnStopMonitor.Click += (s, e) => OnStopMonitorRequested();         //åœæ­¢ç›‘æ§
+            btnRunWorkflow.Click += (s, e) => OnRunWorkflowRequested();         //æ‰“å¼€å·¥ä½œæµ
+            btnToggleSimulator.Click += (s, e) => OnToggleSimulatorRequested(); //åˆ‡æ¢æ¨¡å¼
+            btnToggleModbus.Click += (s, e) => OnToggleModbusRequested();       //æ‰“å¼€modbustcpè®¾å¤‡
+            LoadWorkflowList();                                                 //è·å–é…ç½®æ–‡ä»¶
 
-            LoadWorkflowList();                                                 //»ñÈ¡ÅäÖÃÎÄ¼ş
+            //btnApplyModbus.Click += (s, e) => {
+            //    string ip = txtModbusIp.Text.Trim();
+            //    int port = (int)numModbusPort.Value;
+            //    // è§¦å‘äº‹ä»¶ï¼ŒControllerä¼šå»æ‰§è¡ŒçœŸæ­£çš„é‡è¿
+            //    ModbusReconnectRequested?.Invoke(this, new ModbusReconnectArgs(ip, port));
+            //};
+            // åœ¨æ„é€ å‡½æ•°æˆ– Load äº‹ä»¶ä¸­ä¸º btnSteModbus ç»‘å®šäº‹ä»¶
+            btnSteModbus.Click += (s, e) =>
+            {
+                using (var configForm = new ModbusConfigForm(_currentModbusConfig))
+                {
+                    if (configForm.ShowDialog() == DialogResult.OK)
+                    {
+                        if (configForm.IsChanged)
+                        {
+                            // æ›´æ–°æœ¬åœ°ç¼“å­˜
+                            _currentModbusConfig = configForm.Config;
+                            // é€šçŸ¥ Controller é…ç½®å·²å˜æ›´
+                            ModbusConfigChanged?.Invoke(this, configForm.Config);
+
+                            if (_isModbusConnected)
+                            {
+                                var result = MessageBox.Show(
+                                    "Modbus é€šè®¯å‚æ•°å·²æ›´æ”¹ï¼Œéœ€è¦æ–­å¼€é‡è¿æ‰èƒ½ç”Ÿæ•ˆã€‚æ˜¯å¦ç«‹å³é‡è¿ï¼Ÿ",
+                                    "é…ç½®å˜æ›´",
+                                    MessageBoxButtons.YesNo,
+                                    MessageBoxIcon.Question);
+
+                                if (result == DialogResult.Yes)
+                                {
+                                    ShowResult("âœ… Modbus é…ç½®å·²æ›´æ–°ï¼Œæ­£åœ¨â€œè¿æ¥ Modbusâ€åº”ç”¨æ–°é…ç½®ã€‚");
+                                    OnToggleModbusRequested(); // è§¦å‘è¿æ¥äº‹ä»¶
+                                }
+                            }
+                            else
+                            {
+                                ShowResult("âœ… Modbus é…ç½®å·²ä¿å­˜ï¼Œç‚¹å‡»â€œè¿æ¥ Modbusâ€åº”ç”¨æ–°é…ç½®ã€‚");
+                            }
+                        }
+                    }
+                }
+            };
+
+            btnExportMonitor.Click += (s, e) =>
+            {
+                string? path = CyclicMonitorBuffer.DumpToFile("æ‰‹åŠ¨å¯¼å‡º");
+                if (path != null)
+                    MessageBox.Show($"ç›‘æ§æ•°æ®å·²å¯¼å‡ºè‡³:\n{path}", "å¯¼å‡ºæˆåŠŸ", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                else
+                    MessageBox.Show("ç¼“å†²åŒºä¸ºç©ºï¼Œæ— éœ€å¯¼å‡º", "æç¤º", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            };
+            btnWriteRegister.Click += BtnWriteRegister_Click;
+            btnWriteCoil.Click += BtnWriteCoil_Click;
         }
 
-        // ´¥·¢´ò¿ªÊÂ¼ş
+        // è§¦å‘æ‰“å¼€äº‹ä»¶
         private void OnOpenRequested() => OpenRequested?.Invoke(this, EventArgs.Empty);
-        // ´¥·¢¹Ø±ÕÊÂ¼ş
+        // è§¦å‘å…³é—­äº‹ä»¶
         private void OnCloseDeviceRequested() => CloseDeviceRequested?.Invoke(this, EventArgs.Empty);
-        // ´¥·¢Çå¿ÕÊÂ¼ş
+        // è§¦å‘æ¸…ç©ºäº‹ä»¶
         private void OnClearRequested() => ClearRequested?.Invoke(this, EventArgs.Empty);
-        // »ñÈ¡×´Ì¬ÖáÊÂ¼ş
+        // è·å–çŠ¶æ€è½´äº‹ä»¶
         private void OnGetStatusRequested() => GetStatusRequested?.Invoke(this, EventArgs.Empty);
-        //ÊµÊ±¼à¿ØÊÂ¼ş
+        //å®æ—¶ç›‘æ§äº‹ä»¶
         private void OnStartMonitorRequested() => StartMonitorRequested?.Invoke(this, EventArgs.Empty);
-        //Í£Ö¹¼à¿ØÊÂ¼ş
+        //åœæ­¢ç›‘æ§äº‹ä»¶
         private void OnStopMonitorRequested() => StopMonitorRequested?.Invoke(this, EventArgs.Empty);
-        //´ò¿ª¹¤×÷Á÷¿ØÊÂ¼ş
+        //æ‰“å¼€å·¥ä½œæµæ§äº‹ä»¶
         private void OnRunWorkflowRequested() => RunWorkflowRequested?.Invoke(this, EventArgs.Empty);
-        //ÇĞ»»Ä£Ê½ÊÂ¼ş
+        //åˆ‡æ¢æ¨¡å¼äº‹ä»¶
         private void OnToggleSimulatorRequested() => ToggleSimulatorRequested?.Invoke(this, EventArgs.Empty);
-
+        //è§¦å‘Modbuså¼€å¯/æ–­å¼€äº‹ä»¶
+        private void OnToggleModbusRequested() => ToggleModbusRequested?.Invoke(this, EventArgs.Empty);
+        
         public short SelectedAxis => (short)numAxis.Value;
 
+        private ModbusConfig _currentModbusConfig = new ModbusConfig();
+
+        private bool _isModbusConnected = false;
+
+
         /// <summary>
-        /// ¹© Controller µ÷ÓÃµÄÏÔÊ¾·½·¨
+        /// ä¾› Controller è°ƒç”¨çš„æ˜¾ç¤ºæ–¹æ³•
         /// </summary>
-        /// ×¨ÃÅ¼ÇÂ¼ÓÃ»§µã»÷°´Å¥¡¢Ñ¡ÔñÏÂÀ­¿òµÈ¶¯×÷
+        /// ä¸“é—¨è®°å½•ç”¨æˆ·ç‚¹å‡»æŒ‰é’®ã€é€‰æ‹©ä¸‹æ‹‰æ¡†ç­‰åŠ¨ä½œ
         public void ShowResult(string message)
         {
-            //txtResult.Text = message;
-            string timeStamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
-            txtOperationLog.AppendText($"[{timeStamp}] {message}" + Environment.NewLine);
-            // Ğ´ÈëÎÄ¼ş£¨Àà±ğ£ºOperation£©
-            FileLogger.Log(message, "INFO", "Operation");
+            txtOperationLog.AppendText( message + Environment.NewLine);
         }
-        // ×¨ÃÅ¼ÇÂ¼Ó²¼şÊı¾İ¡¢ÍøÂçĞÄÌø¡¢×´Ì¬±ä»¯µÈ
+        // ä¸“é—¨è®°å½•ç¡¬ä»¶æ•°æ®ã€ç½‘ç»œå¿ƒè·³ã€çŠ¶æ€å˜åŒ–ç­‰
         public void AppendMonitorLog(string message)
         {
-            string timeStamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
-            txtMonitorLog.AppendText($"[{timeStamp}] {message}" + Environment.NewLine);
-            // Ğ´ÈëÎÄ¼ş£¨Àà±ğ£ºMonitor£©
-            FileLogger.Log(message, "INFO", "Monitor");
+            txtMonitorLog.AppendText( message + Environment.NewLine);
         }
 
         /// <summary>
-        /// Çå¿ÕÏÔÊ¾
+        /// æ¸…ç©ºæ˜¾ç¤º
         /// </summary>
         public void ClearResult()
         {
@@ -85,29 +148,27 @@ namespace GtsTest
             txtMonitorLog.Clear();
         }
 
-        // ¿ÉÑ¡£ºÏÔÊ¾´íÎóÏûÏ¢¿ò£¨Ò²¿ÉÓÉ Controller Ö±½Óµ÷ÓÃ MessageBox£©
+        // å¯é€‰ï¼šæ˜¾ç¤ºé”™è¯¯æ¶ˆæ¯æ¡†ï¼ˆä¹Ÿå¯ç”± Controller ç›´æ¥è°ƒç”¨ MessageBoxï¼‰
         public void ShowError(string message, string type)
         {
-            MessageBox.Show(message, "´íÎó", MessageBoxButtons.OK, MessageBoxIcon.Error);
-            // ´íÎó¼ÈÊôÓÚ²Ù×÷Àà£¬Ò²¼ÇÂ¼µ½ÎÄ¼ş£¬Àà±ğ¿É¶¨Îª Operation »ò General
-            FileLogger.Log(message, "ERROR", type);
+            MessageBox.Show(message, "é”™è¯¯", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
 
         public void SetSimulationModeUI(bool isSimulation)
         {
-            // °²È«µØ¸üĞÂ UI£¨ÎŞĞè Invoke£¬ÒòÎª¸Ã·½·¨»áÔÚÖ÷Ïß³Ì±»µ÷ÓÃ£©
-            btnToggleSimulator.Text = isSimulation ? "ÇĞ»»µ½ÕæÊµ" : "ÇĞ»»µ½Ä£Äâ";
+            // å®‰å…¨åœ°æ›´æ–° UIï¼ˆæ— éœ€ Invokeï¼Œå› ä¸ºè¯¥æ–¹æ³•ä¼šåœ¨ä¸»çº¿ç¨‹è¢«è°ƒç”¨ï¼‰
+            btnToggleSimulator.Text = isSimulation ? "åˆ‡æ¢åˆ°çœŸå®" : "åˆ‡æ¢åˆ°æ¨¡æ‹Ÿ";
             btnToggleSimulator.BackColor = isSimulation ? Color.LightGreen : Color.LightGray;
         }
 
-        // É¨Ãè Workflows Ä¿Â¼£¬Ìî³äÏÂÀ­¿ò
+        // æ‰«æ Workflows ç›®å½•ï¼Œå¡«å……ä¸‹æ‹‰æ¡†
         private void LoadWorkflowList()
         {
             string workflowsDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Workflows");
             if (!Directory.Exists(workflowsDir))
             {
                 Directory.CreateDirectory(workflowsDir);
-                // ¿ÉÒÔÔÚÕâÀïĞ´Ò»¸öÄ¬ÈÏµÄ JSON Ê¾ÀıÎÄ¼ş£¬»òÌáÊ¾ÓÃ»§Ìí¼Ó
+                // å¯ä»¥åœ¨è¿™é‡Œå†™ä¸€ä¸ªé»˜è®¤çš„ JSON ç¤ºä¾‹æ–‡ä»¶ï¼Œæˆ–æç¤ºç”¨æˆ·æ·»åŠ 
             }
 
             var files = Directory.GetFiles(workflowsDir, "*.json");
@@ -120,11 +181,86 @@ namespace GtsTest
                 cmbWorkflow.SelectedIndex = 0;
         }
 
+        // ä¾› Controller è°ƒç”¨çš„ UI æ›´æ–°æ–¹æ³•ï¼ˆæ›´æ–°æŒ‡ç¤ºç¯å’ŒçŠ¶æ€æ ï¼‰ 
+        public void UpdateModbusStatus(bool connected, ModbusConfig config, string? errorMsg = null)
+        {
+            _isModbusConnected = connected;
+            if (connected)
+            {
+                string connectionInfo = config.Protocol == ModbusProtocol.Tcp
+                    ? $"TCP {config.IpAddress}:{config.Port}"
+                    : $"RTU {config.PortName} ({config.BaudRate}bps)";
+                lblModbusStatus.Text = $"Modbus å·²è¿æ¥ ({connectionInfo})";
+                lblModbusStatus.BackColor = Color.LimeGreen;
+            }
+            else
+            {
+                lblModbusStatus.Text = "Modbus å·²æ–­å¼€";
+                lblModbusStatus.BackColor = Color.Red;
+            }
 
+            //åˆ‡æ¢æŒ‰é’®çŠ¶æ€ 
+            btnToggleModbus.Text = connected ? "æ–­å¼€ Modbus" : "è¿æ¥ Modbus";
+            btnToggleModbus.BackColor = connected ? Color.LightCoral : Color.LightGreen;
+        }
+
+        private void BtnWriteRegister_Click(object? sender, EventArgs e)
+        {
+            // è¯»å– UI æ•°æ®
+            ushort address = (ushort)numWriteAddress.Value;
+            DataType dataType = (DataType)cmbWriteDataType.SelectedIndex;
+            ByteOrder byteOrder = (ByteOrder)cmbByteOrder.SelectedIndex;
+
+            // è§£æ txtWriteValues ä¸­çš„å€¼ï¼ˆæ”¯æŒé€—å·åˆ†éš”å¤šä¸ªï¼‰
+            string[] parts = txtWriteValues.Text.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries);
+            List<object> values = new List<object>();
+            foreach (string part in parts)
+            {
+                string trimmed = part.Trim();
+                if (string.IsNullOrEmpty(trimmed)) continue;
+
+                // æ ¹æ®æ•°æ®ç±»å‹è½¬æ¢
+                try
+                {
+                    object converted = dataType switch
+                    {
+                        DataType.Int16 => Convert.ToInt16(trimmed),
+                        DataType.UInt16 => Convert.ToUInt16(trimmed),
+                        DataType.Int32 => Convert.ToInt32(trimmed),
+                        DataType.UInt32 => Convert.ToUInt32(trimmed),
+                        DataType.Float => Convert.ToSingle(trimmed),
+                        DataType.Double => Convert.ToDouble(trimmed),
+                        _ => throw new NotSupportedException($"ä¸æ”¯æŒçš„ç±»å‹: {dataType}")
+                    };
+                    values.Add(converted);
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show($"å€¼ '{trimmed}' æ— æ³•è½¬æ¢ä¸º {dataType}: {ex.Message}", "è¾“å…¥é”™è¯¯", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+            }
+
+            if (values.Count == 0)
+            {
+                MessageBox.Show("è¯·è¾“å…¥è‡³å°‘ä¸€ä¸ªæœ‰æ•ˆæ•°å€¼", "æç¤º", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            // è§¦å‘äº‹ä»¶
+            WriteRegisterRequested?.Invoke(this, new WriteRegisterEventArgs(address, dataType, byteOrder, values.ToArray()));
+        }
+
+        private void BtnWriteCoil_Click(object? sender, EventArgs e)
+        {
+            ushort address = (ushort)numCoilAddress.Value;
+            bool value = cmbCoilValue.SelectedIndex == 0; // ON(1) -> true, OFF(0) -> false
+            WriteCoilRequested?.Invoke(this, new WriteCoilEventArgs(address, value));
+        }
 
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
-            // ´¥·¢Í£Ö¹¼à¿ØÊÂ¼ş£¬ÈÃ Controller È¥È¡ÏûÏß³Ì
+            // è§¦å‘åœæ­¢ç›‘æ§äº‹ä»¶ï¼Œè®© Controller å»å–æ¶ˆçº¿ç¨‹
             StopMonitorRequested?.Invoke(this, EventArgs.Empty);
             base.OnFormClosing(e);
         }
