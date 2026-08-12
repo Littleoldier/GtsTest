@@ -1,7 +1,7 @@
 # 🚀 GtsTest 运动控制卡调试平台
 
 基于 .NET 8.0 WinForms 开发的高性能运动控制测试工具，专为 **固高 GTS 系列运动控制卡** 设计。  
-采用 **MVP 架构** 与 **命令模式**，实现了硬件无关的模拟器支持与动态 JSON 工作流编排。
+采用 **MVP 架构** 与 **命令模式**，实现了硬件无关的模拟器支持、动态 JSON 工作流编排，并集成了 **Modbus 通讯**（TCP/RTU）与 **循环监控缓冲区（黑匣子）**，是集运动控制与现场总线监控于一体的综合调试平台。
 
 ---
 
@@ -11,10 +11,10 @@
 
 <p align="center">
   <img src="Images/main.png" width="45%" alt="主操作界面"/>
-  <img src="Images/test.png" width="45%" alt="运行测试效果"/>
+  <img src="Images/ModbusWriteRegister.png" width="45%" alt="Modbus 寄存器/线圈读写"/>
 </p>
 <p align="center">
-  <em>左侧：主操作界面（轴控/监控/模式切换） &nbsp;|&nbsp; 右侧：工作流执行与日志输出</em>
+  <em>左侧：主操作界面（轴控/监控/模式切换） &nbsp;|&nbsp; 右侧：Modbus 通讯测试（寄存器/线圈读写）</em>
 </p>
 
 ---
@@ -25,12 +25,13 @@
 | :--- | :--- |
 | **设备初始化** | 打开控制卡并复位，建立通信连接 |
 | **关闭设备** | 安全释放硬件资源，断开与控制卡的连接 |
-| **实时监控** | 独立后台线程高频轮询轴位置、速度、加速度，数据实时刷新 |
-| **轴状态查询** | 一键获取轴状态码、运动模式、限位/报警信息 |
+| **实时监控** | 独立后台线程高频轮询轴位置、速度、加速度，同步轮询 Modbus 寄存器数据，数据实时刷新 |
+| **轴状态查询** | 一键获取轴状态码、运动模式、限位/报警信息，并解析为可读文本 |
 | **模拟/真实切换** | 通过静态开关一键切换，无需重启程序即可在模拟环境和真实硬件间无缝切换 |
 | **JSON 工作流** | 支持通过配置文件动态编排运动指令（回零、定位、等待 IO、延时），无需修改代码即可调整流程 |
-| **双日志系统** | 操作日志与实时监控日志分栏显示，后端按类别（Operation/Monitor）自动落盘 |
-| **日志文件归档** | 按日期和类别自动生成日志文件（如 `OperationLog_2026-08-02.txt`），便于追溯 |
+| **Modbus 通讯** | 支持 TCP/RTU 协议，可配置寄存器起始地址、数量、数据类型（Int16/UInt16/Int32/Float/Double 等）和字节序（大端/小端），实现读写保持寄存器与线圈 |
+| **监控数据导出** | 循环内存缓冲区（黑匣子）自动保存最近 30000 条监控数据（轴状态 + Modbus 数据），可一键导出为文本文件，便于故障回溯分析 |
+| **双日志系统** | 操作日志与监控日志分栏显示，后端按类别（Operation/Monitor/Modbus）自动落盘，支持文件滚动（按大小或日期）和过期清理 |
 
 ---
 
@@ -44,7 +45,9 @@
 | **模拟器实现** | 在 `GtsModel` 层完全模拟固高 API 行为，内置正弦波速度数据和自动递增位置，无需硬件即可完整演示所有 UI 交互和流程逻辑。 |
 | **硬件接口封装** | `gts.cs` 为固高 SDK 的 P/Invoke 声明（**未包含在仓库中**，需从固高官方 SDK 获取）；`GtsModel` 层统一封装错误处理，屏蔽底层调用细节。 |
 | **配置驱动** | 工作流使用 JSON 格式配置，程序启动时自动扫描 `Workflows/` 目录并填充下拉列表，新增流程只需添加 JSON 文件，无需重新编译。 |
-| **日志系统** | `FileLogger` 静态类统一处理文件落盘，线程安全（`lock` 同步），支持按类别（Operation / Monitor / General）分类存储。 |
+| **Modbus 集成** | 使用 `NModbus` 库实现标准 Modbus 协议，支持 TCP 和 RTU 两种模式，提供配置界面动态修改连接参数，并支持寄存器值编码/解码（大小端/数据类型）。 |
+| **循环监控缓冲区** | `CyclicMonitorBuffer` 静态类维护一个固定大小的 `ConcurrentQueue`，以线程安全方式存储最新监控数据，支持一键导出快照，实现“黑匣子”功能。 |
+| **日志系统** | `AppLogger` 静态类统一处理文件落盘，线程安全（`lock` 同步），支持按类别（Operation / Monitor / Modbus）区分，并按日期和大小滚动文件，自动清理过期日志，避免磁盘占满。 |
 
 ---
 
@@ -67,15 +70,30 @@
 // true = 模拟运行（无需硬件） / false = 连接真实控制卡
 GtsModel.UseSimulation = true;
 ```
-### 3. 编译与启动
+### 3. Modbus 配置
+点击主界面 设置 Modbus 按钮，打开配置窗体：
+```csharp
+选择协议（TCP 或 RTU）
+
+填写 IP/端口或串口参数（波特率、数据位等）
+
+设定寄存器起始地址、数量和数据类型（Int16/UInt16/Int32/Float/Double）
+
+选择字节序（大端/小端）
+
+点击 确定 保存配置，然后点击 连接 Modbus 建立通讯。
+```
+### 4. 编译与启动
 环境要求：Visual Studio 2022+ 或 .NET 8.0 SDK
 
-编译后运行，点击 “初始化” 按钮建立连接，选择轴号即可开始监控或执行工作流
+编译后运行，点击 初始化 按钮建立运动控制卡连接，选择轴号即可开始监控或执行工作流。
 
-### 4. 工作流配置
+### 5. 工作流配置
 在 Workflows/ 目录下新建 .json 文件，程序启动时会自动扫描并显示在下拉列表中。
-```csharp
+
 📄 示例 1：简单往返（SimpleMove.json）
+```csharp
+
 {
   "Name": "简单往返",
   "Description": "走到20000 -> 延时 -> 回到0",
@@ -86,7 +104,10 @@ GtsModel.UseSimulation = true;
   ]
 }
 
+```
 📄 示例 2：标准回零定位流程（StandardFlow.json）
+```csharp
+
 {
   "Name": "标准回零定位流程",
   "Description": "回零 -> 走到10000 -> 等待IO0 -> 走到5000 -> 延时500ms",
@@ -100,8 +121,7 @@ GtsModel.UseSimulation = true;
 }
 
 ```
-
-📋 支持的指令类型
+### 📋 支持的指令类型
 | 指令类型 | 参数 | 说明 | 
 | :--- | :--- |:--- | 
 | `Home` | Axis, HomePos, Vel, Acc  | 执行回零，到达 HomePos 位置  |
@@ -109,45 +129,59 @@ GtsModel.UseSimulation = true;
 | `WaitIO` | IoIndex, ExpectValue, TimeoutMs | 等待指定 IO 输入达到期望值（支持超时） |
 | `Delay` | DelayMs | 延时等待（毫秒） |
 
-
 ### 📁 目录结构
 ```csharp
 GtsTest/
-├── GtsModel.cs              		# 核心数据模型（封装固高 API + 模拟器实现）
-├── GtsController.cs         		# 控制器（事件订阅、线程调度、工作流路由）
-├── Form1.cs                 		# 主视图（UI 控件与事件暴露）
-├── Form1.Designer.cs        		# 视图设计器文件
-├── FileLogger.cs            		# 日志落盘工具（线程安全）
-├── Commands/                	 	# 命令模式实现
-│   ├── IMotionCommand.cs    	# 命令接口
-│   ├── MotionCommandBase.cs 	# 命令基类（模板方法）
-│   ├── HomeCommand.cs       	# 回零指令
-│   ├── MoveAbsCommand.cs    	# 绝对定位指令
-│   ├── WaitIOCommand.cs     	# 等待 IO 指令
-│   ├── DelayCommand.cs      		# 延时指令
-│   ├── SequenceCommand.cs   	# 序列组合指令
-│   ├── CommandConfig.cs     		# JSON 配置模型
-│   ├── CommandFactory.cs    		# 命令工厂
-│   └── WorkflowConfig.cs    		# 工作流配置模型
-├── Workflows/               		# JSON 工作流配置文件存放目录
-│   ├── SimpleMove.json      		# 示例：简单往返
-│   └── StandardFlow.json    		# 示例：标准回零定位流程
-├── Images/                  		# 文档用截图（main.png, test.png）
-└── Logs/                    		# 运行时日志目录（自动生成）
+├── GtsModel.cs                    # 核心数据模型（封装固高 API + 模拟器实现）
+├── GtsController.cs               # 控制器（事件订阅、线程调度、工作流路由）
+├── Form1.cs                       # 主视图（UI 控件与事件暴露）
+├── Form1.Designer.cs              # 视图设计器文件
+├── Program.cs                     # 程序入口（设置模拟模式）
+├── AppLogger.cs                   # 日志落盘工具（线程安全，文件滚动，支持分类）
+├── CyclicMonitorBuffer.cs         # 循环监控缓冲区（黑匣子，30,000 条缓存）
+├── Commands/                      # 命令模式实现
+│   ├── IMotionCommand.cs          # 命令接口
+│   ├── MotionCommandBase.cs       # 命令基类（模板方法）
+│   ├── HomeCommand.cs             # 回零指令
+│   ├── MoveAbsCommand.cs          # 绝对定位指令
+│   ├── WaitIOCommand.cs           # 等待 IO 指令
+│   ├── DelayCommand.cs            # 延时指令
+│   ├── SequenceCommand.cs         # 序列组合指令
+│   ├── CommandConfig.cs           # JSON 配置模型
+│   ├── CommandFactory.cs          # 命令工厂
+│   └── WorkflowConfig.cs          # 工作流配置模型
+├── Modbus/                        # Modbus 通讯模块
+│   ├── ModbusClient.cs            # Modbus 客户端（连接/读写）
+│   ├── ModbusConfig.cs            # 配置模型（协议/数据类型/字节序）
+│   ├── ModbusConfigForm.cs        # 配置界面
+│   ├── ModbusConfigForm.Designer.cs # 配置界面设计器
+│   ├── ModbusFormatter.cs         # 数据格式化（十进制/十六进制/ASCII 等）
+│   ├── ModbusConnectionEventArgs.cs # 连接状态事件参数
+│   ├── WriteRegisterEventArgs.cs  # 写寄存器事件参数
+│   └── WriteCoilEventArgs.cs      # 写线圈事件参数
+├── Workflows/                     # JSON 工作流配置文件存放目录
+│   ├── SimpleMove.json            # 示例：简单往返
+│   └── StandardFlow.json          # 示例：标准回零定位流程
+├── Images/                        # 文档用截图（main.png, ModbusWriteRegister.png 等）
+├── Logs/                          # 运行时日志目录（自动生成）
+├── GtsTest.csproj                 # 项目文件
+└── README.md                      # 项目说明文档
 ```
-
-
 ### 🚀 未来规划
 ```csharp
 1、增加 PVT / 插补运动的高级配置界面
 2、完善 JSON 工作流的错误校验与断点续跑功能
 3、支持多轴联动轨迹的实时速度倍率调整（Override）
+4、扩展 Modbus 功能，支持更多的功能码和离散量读写
+5、增加波形图表实时显示轴位置/速度曲线
 ```
 
 ### ⚠️ 注意事项
 ```csharp
 1、真实模式下操作设备请务必注意安全限位，避免机械碰撞。
 2、模拟模式数据仅用于 UI 演示和逻辑验证，与实际物理反馈无关。
-3、切换模拟/真实模式后，必须重新点击“初始化” 才能生效。
+3、切换模拟/真实模式后，必须重新点击 初始化 才能生效。
 4、工作流 JSON 文件需放置在 Workflows/ 目录下，程序启动时会自动扫描并填充下拉列表。
+5、Modbus 通讯依赖 NModbus 包，如遇到连接问题，请检查防火墙/串口权限。
+6、gts.dll 需与 GtsTest.exe 同目录，否则程序会抛出 DllNotFoundException。
 ```
