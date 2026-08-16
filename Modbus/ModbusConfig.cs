@@ -2,6 +2,14 @@
 
 namespace GtsTest.Modbus
 {
+    public enum AddressType
+    {
+        HoldingRegister,  // 保持寄存器 (0x03/0x06/0x10)
+        Coil,             // 线圈 (0x01/0x05/0x0F)
+        InputRegister,    // 输入寄存器 (0x04)
+        DiscreteInput     // 离散输入 (0x02)
+    }
+
     public enum ModbusProtocol
     {
         Tcp,
@@ -37,6 +45,10 @@ namespace GtsTest.Modbus
 
     public class ModbusConfig
     {
+        /// <summary>
+        /// Modbus 从站地址 (1~247)，默认 1
+        /// </summary>
+        public byte SlaveAddress { get; set; } = 1;
         public ModbusProtocol Protocol { get; set; } = ModbusProtocol.Tcp;
         public int TimeoutMs { get; set; } = 3000;
         public DataType DataType { get; set; } = DataType.Int16;
@@ -57,5 +69,8 @@ namespace GtsTest.Modbus
         // 新增：读取范围
         public ushort StartAddress { get; set; } = 0;
         public ushort RegisterCount { get; set; } = 1;
+
+        //地址类型
+        public AddressType AddressType { get; set; } = AddressType.HoldingRegister;
     }
 }

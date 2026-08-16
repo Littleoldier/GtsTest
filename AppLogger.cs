@@ -35,7 +35,7 @@ namespace GtsTest
         private static string _currentLogFile = "";
         private static DateTime _currentDate = DateTime.MinValue;
         private static long _currentFileSize = 0;
-
+        public static string CurrentUser { get; set; } = "未登录";
         /// <summary>
         /// 初始化（在 Program.cs 中调用）
         /// </summary>
@@ -64,7 +64,9 @@ namespace GtsTest
             string timeStamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff");
             string levelStr = level.ToString().ToUpper();
             string categoryTag = string.IsNullOrEmpty(category) ? "" : $"[{category}] ";
+            string userTag = string.IsNullOrEmpty(CurrentUser) ? "" : $" [User:{CurrentUser}]";
             string logLine = $"[{timeStamp}] [{levelStr}] {categoryTag}{message}";
+            
 
             // 3. 触发 UI 事件（主线程安全由调用方处理）
             OnLogReceived?.Invoke(level, logLine, category);

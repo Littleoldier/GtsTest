@@ -27,8 +27,10 @@ namespace GtsTest.Modbus
                 DisplayFormat = currentConfig.DisplayFormat,
                 TimeoutMs = currentConfig.TimeoutMs,
                 ByteOrder = currentConfig.ByteOrder,
-                StartAddress = currentConfig.StartAddress,      
-                RegisterCount = currentConfig.RegisterCount     
+                StartAddress = currentConfig.StartAddress,
+                RegisterCount = currentConfig.RegisterCount,
+                SlaveAddress = currentConfig.SlaveAddress,
+                AddressType = currentConfig.AddressType
             };
             Config = currentConfig;
             LoadConfig();
@@ -55,6 +57,8 @@ namespace GtsTest.Modbus
             cmbDisplayFormat.SelectedIndex = (int)Config.DisplayFormat;
             numStartAddress.Value = Config.StartAddress;
             numRegisterCount.Value = Config.RegisterCount;
+            numSlaveAddress.Value = Config.SlaveAddress;
+            cmbAddressType.SelectedIndex = (int)Config.AddressType;
             cmbByteOrder.SelectedIndex = Config.ByteOrder == ByteOrder.BigEndian ? 0 : 1;
 
             // 更新 TCP/RTU 可见性
@@ -89,6 +93,7 @@ namespace GtsTest.Modbus
             // 读取配置
             Config.Protocol = cmbProtocol.SelectedIndex == 0 ? ModbusProtocol.Tcp : ModbusProtocol.Rtu;
             Config.IpAddress = txtIp.Text.Trim();
+            Config.SlaveAddress = (byte)numSlaveAddress.Value;
             Config.Port = (int)numPort.Value;
             Config.PortName = cmbComPort.Text.Trim();
             Config.BaudRate = (int)cmbBaudRate.SelectedItem;
@@ -113,6 +118,7 @@ namespace GtsTest.Modbus
             Config.DisplayFormat = (DisplayFormat)cmbDisplayFormat.SelectedIndex;
             Config.StartAddress = (ushort)numStartAddress.Value;
             Config.RegisterCount = (ushort)numRegisterCount.Value;
+            Config.AddressType = (AddressType)cmbAddressType.SelectedIndex;
 
             // 读取字节序
             Config.ByteOrder = cmbByteOrder.SelectedIndex == 0 ? ByteOrder.BigEndian : ByteOrder.LittleEndian;
@@ -134,10 +140,12 @@ namespace GtsTest.Modbus
                    a.Parity == b.Parity &&
                    a.DataType == b.DataType &&
                    a.DisplayFormat == b.DisplayFormat &&
-                   a.TimeoutMs == b.TimeoutMs&&
-                   a.StartAddress == b.StartAddress&& 
-                   a.RegisterCount == b.RegisterCount&&
-                   a.ByteOrder == b.ByteOrder;  // 新增
+                   a.TimeoutMs == b.TimeoutMs &&
+                   a.StartAddress == b.StartAddress &&
+                   a.RegisterCount == b.RegisterCount &&
+                   a.SlaveAddress == b.SlaveAddress &&
+                   a.ByteOrder == b.ByteOrder &&
+                   a.AddressType == b.AddressType;
         }
 
         // 取消按钮点击事件（可选，但设计器中已绑定）

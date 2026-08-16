@@ -1,35 +1,30 @@
+using GtsTest.Services;
+
 namespace GtsTest
 {
     internal static class Program
     {
-        /// <summary>
-        ///  The main entry point for the application.
-        /// </summary>
         [STAThread]
         static void Main()
         {
-            // To customize application configuration such as set high DPI settings or default font,
-            // see https://aka.ms/applicationconfiguration.
-            //ApplicationConfiguration.Initialize();
-            //Application.Run(new Form1());
+            try
+            {
+                AppLogger.Initialize();
+                AppLogger.GlobalLogLevel = LogLevel.Info;
+                GtsModel.UseSimulation = true;
 
-            // 初始化日志系统（放在最前面，确保任何日志输出前已准备好）
-            AppLogger.Initialize();         
-            AppLogger.GlobalLogLevel = LogLevel.Info;  // 可根据需要调整
+                Application.EnableVisualStyles();
+                Application.SetCompatibleTextRenderingDefault(false);
 
-            // ==== 启用模拟模式 ====
-            GtsModel.UseSimulation = true;   // 设置为 false 则使用真实硬件
+                var repo = new SqliteRepository();
+                var authService = new AuthenticationService(repo);
 
-            Application.EnableVisualStyles();
-            Application.SetCompatibleTextRenderingDefault(false);
-
-            // 创建 Model、View、Controller
-            GtsModel model = new GtsModel();
-            Form1 view = new Form1();
-            GtsController controller = new GtsController(model, view);
-
-            // 启动 View
-            Application.Run(view);
+                Application.Run(new Form1(repo, authService));
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"程序启动失败: {ex.Message}\n\n{ex.StackTrace}", "启动错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
         }
     }
 }

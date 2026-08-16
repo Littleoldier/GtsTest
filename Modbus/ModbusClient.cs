@@ -108,7 +108,7 @@ namespace GtsTest.Modbus
             _isConnected = false;
 
             if (raiseEvent)
-                ConnectionStateChanged?.Invoke(this, new ModbusConnectionEventArgs(false, "Modbus连接已断开"));
+                ConnectionStateChanged?.Invoke(this, new ModbusConnectionEventArgs(false, $"从机={_config.SlaveAddress} " + "Modbus连接已断开"));
         }
 
         /// <summary>
@@ -120,14 +120,14 @@ namespace GtsTest.Modbus
 
             try
             {
-                ushort[] raw = _master.ReadHoldingRegisters(slaveAddress, startAddress, count);
+                ushort[] raw = _master.ReadHoldingRegisters(_config.SlaveAddress, startAddress, count);
                 return ConvertRawToType(raw, _config.DataType);
             }
             catch (Exception ex)
             {
                 Log($"❌ Modbus读取失败: {ex.Message}", LogLevel.Warn);
                 _isConnected = false;
-                ConnectionStateChanged?.Invoke(this, new ModbusConnectionEventArgs(false, "读取超时，链路中断"));
+                ConnectionStateChanged?.Invoke(this, new ModbusConnectionEventArgs(false, $"从机={_config.SlaveAddress} "+"读取超时，链路中断"));
                 return null;
             }
         }
@@ -138,7 +138,7 @@ namespace GtsTest.Modbus
             try
             {
                 // 读取原始寄存器
-                ushort[] raw = _master.ReadHoldingRegisters(slaveAddress, startAddress, count);
+                ushort[] raw = _master.ReadHoldingRegisters(_config.SlaveAddress, startAddress, count);
                 // 转换为指定类型
                 object? converted = ConvertRawToType(raw, _config.DataType);
                 return new ModbusReadResult
@@ -149,9 +149,64 @@ namespace GtsTest.Modbus
             }
             catch (Exception ex)
             {
-                Log($"❌ Modbus读取转换指定类型失败: {ex.Message}", LogLevel.Warn);
+                Log($"❌ Modbus读取转换指定类型失败:从机={_config.SlaveAddress} {ex.Message}", LogLevel.Warn);
                 _isConnected = false;
-                ConnectionStateChanged?.Invoke(this, new ModbusConnectionEventArgs(false, "读取超时，链路中断"));
+                ConnectionStateChanged?.Invoke(this, new ModbusConnectionEventArgs(false, $"从机={_config.SlaveAddress} " + "读取超时，链路中断"));
+                return null;
+            }
+        }
+        public ModbusReadResult? ReadDataByType(ushort startAddress, ushort count)
+        {
+            if (!_isConnected || _master == null) return null;
+
+            try
+            {
+                switch (_config.AddressType)
+                {
+                    case AddressType.HoldingRegister:
+                        ushort[] hr = _master.ReadHoldingRegisters(_config.SlaveAddress, startAddress, count);
+                        return new ModbusReadResult
+                        {
+                            RawRegisters = hr,
+                            ConvertedValue = ConvertRawToType(hr, _config.DataType)
+                        };
+
+                    case AddressType.Coil:
+                        bool[] coils = _master.ReadCoils(_config.SlaveAddress, startAddress, count);
+                        ushort[] coilRaw = coils.Select(b => (ushort)(b ? 1 : 0)).ToArray();
+                        return new ModbusReadResult
+                        {
+                            RawRegisters = coilRaw,
+                            ConvertedValue = coils
+                        };
+
+                    case AddressType.InputRegister:
+                        ushort[] ir = _master.ReadInputRegisters(_config.SlaveAddress, startAddress, count);
+                        return new ModbusReadResult
+                        {
+                            RawRegisters = ir,
+                            ConvertedValue = ConvertRawToType(ir, _config.DataType)
+                        };
+
+                    case AddressType.DiscreteInput:
+                        bool[] dis = _master.ReadInputs(_config.SlaveAddress, startAddress, count);
+                        ushort[] disRaw = dis.Select(b => (ushort)(b ? 1 : 0)).ToArray();
+                        return new ModbusReadResult
+                        {
+                            RawRegisters = disRaw,
+                            ConvertedValue = dis
+                        };
+
+                    default:
+                        throw new NotSupportedException($"不支持的地址类型: {_config.AddressType}");
+                }
+            }
+            catch (Exception ex)
+            {
+                // 统一日志和事件通知
+                Log($"❌ Modbus读取失败 (类型={_config.AddressType}, 从机={_config.SlaveAddress}): {ex.Message}", LogLevel.Warn);
+                _isConnected = false;
+                ConnectionStateChanged?.Invoke(this, new ModbusConnectionEventArgs(false, $"从机={_config.SlaveAddress} 读取超时，链路中断"));
                 return null;
             }
         }
@@ -207,19 +262,19 @@ namespace GtsTest.Modbus
         {
             if (!_isConnected || _master == null)
             {
-                Log("❌ 写单个线圈失败：Modbus 未连接", LogLevel.Error);
+                Log($"❌ 写单个线圈失败：从机={_config.SlaveAddress} Modbus 未连接", LogLevel.Error);
                 return false;
             }
 
             try
             {
-                _master.WriteSingleCoil(slaveAddress, address, value);
-                Log($"✅ 写单个线圈成功 地址={address}  值={value}", LogLevel.Info);
+                _master.WriteSingleCoil(_config.SlaveAddress, address, value);
+                Log($"✅ 写单个线圈成功: 从机={_config.SlaveAddress} 地址={address}  值={value}", LogLevel.Info);
                 return true;
             }
             catch (Exception ex)
             {
-                Log($"❌ 写单个线圈异常: {ex.Message}", LogLevel.Error);
+                Log($"❌ 写单个线圈异常: 从机={_config.SlaveAddress}  地址={address}  值={value} {ex.Message}", LogLevel.Error);
                 return false;
             }
 
@@ -232,19 +287,19 @@ namespace GtsTest.Modbus
         {
             if (!_isConnected || _master == null)
             {
-                Log("❌ 写多个线圈失败：Modbus 未连接", LogLevel.Error);
+                Log($"❌ 写多个线圈失败： 从机={_config.SlaveAddress} Modbus 未连接", LogLevel.Error);
                 return false;
             }
 
             try
             {
-                _master.WriteMultipleCoils(slaveAddress, address, values);
-                Log($"✅ 写多个线圈成功 起始地址={address} 数量={values.Length}", LogLevel.Info);
+                _master.WriteMultipleCoils(_config.SlaveAddress, address, values);
+                Log($"✅ 写多个线圈成功: 从机={_config.SlaveAddress}  起始地址={address} 数量={values.Length}", LogLevel.Info);
                 return true;
             }
             catch (Exception ex)
             {
-                Log($"❌ 写多个线圈异常: {ex.Message}", LogLevel.Error);
+                Log($"❌ 写多个线圈异常: 从机={_config.SlaveAddress} {ex.Message}", LogLevel.Error);
                 return false;
             }
         }
@@ -256,19 +311,19 @@ namespace GtsTest.Modbus
         {
             if (!_isConnected || _master == null)
             {
-                Log("❌ 写单个寄存器失败：Modbus 未连接", LogLevel.Error);
+                Log($"❌ 写单个寄存器失败： 从机={_config.SlaveAddress} Modbus 未连接", LogLevel.Error);
                 return false;
             }
 
             try
             {
-                _master.WriteSingleRegister(slaveAddress, address, value);
-                Log($"✅ 写单个寄存器成功 地址={address} 值=0x{value:X4}", LogLevel.Info);
+                _master.WriteSingleRegister(_config.SlaveAddress, address, value);
+                Log($"✅ 写单个寄存器成功: 从机={_config.SlaveAddress} 地址={address} 值=0x{value:X4}", LogLevel.Info);
                 return true;
             }
             catch (Exception ex)
             {
-                Log($"❌ 写单个寄存器异常: {ex.Message}", LogLevel.Error);
+                Log($"❌ 写单个寄存器异常: 从机={_config.SlaveAddress} {ex.Message}", LogLevel.Error);
                 return false;
             }
         }
@@ -280,19 +335,19 @@ namespace GtsTest.Modbus
         {
             if (!_isConnected || _master == null)
             {
-                Log("❌ 写多个寄存器失败：Modbus 未连接", LogLevel.Error);
+                Log($"❌ 写多个寄存器失败： 从机={_config.SlaveAddress} Modbus 未连接", LogLevel.Error);
                 return false;
             }
 
             try
             {
-                _master.WriteMultipleRegisters(slaveAddress, address, values);
-                Log($"✅ 写多个寄存器 起始地址={address} 数量={values.Length}", LogLevel.Info);
+                _master.WriteMultipleRegisters(_config.SlaveAddress, address, values);
+                Log($"✅ 写多个寄存器成功:  从机={_config.SlaveAddress} 起始地址={address} 数量={values.Length}", LogLevel.Info);
                 return true;
             }
             catch (Exception ex)
             {
-                Log($"❌ 写多个寄存器异常: {ex.Message}", LogLevel.Error);
+                Log($"❌ 写多个寄存器异常: 从机={_config.SlaveAddress} {ex.Message}", LogLevel.Error);
                 return false;
             }
         }
