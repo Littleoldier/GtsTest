@@ -1,0 +1,56 @@
+# ===== 编译输出（不需要上传） =====
+bin/
+obj/
+.vs/
+
+# ===== 第三方 DLL（固高库，禁止上传） =====
+*.dll
+
+# ===== 固高接口声明文件（不上传源码） =====
+gts.cs
+
+# ===== Visual Studio 用户配置 =====
+*.user
+*.suo
+*.pidb
+*.psses
+*.vsp
+*.vspx
+*.sln.docstates
+
+# ===== 运行时日志（如果有） =====
+Logs/
+
+# ===== 数据库文件（自动生成，不上传） =====
+*.db
+*.db-shm
+*.db-wal
+
+# ===== 系统临时文件 =====
+Thumbs.db
+Desktop.ini
+
+# ===== NuGet 包缓存 =====
+packages/
+
+# ===== 发布/部署输出 =====
+publish/
+*.nupkg
+
+# ===== 测试结果 =====
+TestResults/
+*.trx
+
+# ===== 本地配置文件（包含敏感信息） =====
+appsettings.Development.json
+appsettings.Production.json
+*.local.json
+secrets.json
+
+# ===== Rider / JetBrains IDE =====
+.idea/
+*.sln.iml
+
+# ===== 代码分析缓存 =====
+*.cache
+*.et
