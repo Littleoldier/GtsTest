@@ -58,20 +58,20 @@
 
 ### 核心功能模块
 
-| 工作流编辑 | MQTT 通信 |
+| 工作流编辑（主界面） | 工作流编辑（系统配置中心） |
 |:---:|:---:|
-| ![工作流](Images/Workflow.png) | ![MQTT](Images/MqttControl.png) |
-| 工作流下拉选择、步骤列表（步骤/命令/状态/参数）、执行状态（空闲/当前步骤/进度/耗时） | Broker 地址/端口/用户名/密码、连接/断开、主题订阅/取消订阅、消息发布（含保留标志） |
+| ![工作流](Images/Workflow.png) | ![工作流编辑](Images/WorkSystemComfig.png) |
+| 主界面生产执行选项卡：工作流下拉选择、步骤列表、执行状态（空闲/当前步骤/进度/耗时） | 系统配置中心工作流编辑器：新建/保存/运行/停止、步骤增删改/上移下移 |
 
-| OPC UA 通信 | 系统工具 |
+| MQTT 通信 | OPC UA 通信 |
 |:---:|:---:|
-| ![OPC UA](Images/OpcUa.png) | ![系统工具](Images/SystemConfigTool.png) |
-| 服务器地址输入、连接/断开、节点ID订阅/取消订阅、实时数据日志显示 | 系统控制（初始化运动控制卡/热加载配置/保存配置）、模拟模式切换、运维工具（导出黑匣子/清空日志/系统诊断） |
+| ![MQTT](Images/MqttSystemComfig.png) | ![OPC UA](Images/OpcUaSystemComfig.png) |
+| Broker地址/端口/用户名/密码、连接/断开、主题订阅/取消订阅、消息发布（含保留标志） | 服务器地址输入、连接/断开、节点ID订阅/取消订阅、实时数据日志显示 |
 
-| 用户管理 |
-|:---:|
-| ![用户管理](Images/UserManagement.png) |
-| 用户列表（用户名/全名/角色/状态/创建时间/失败次数/删除标记）、添加/编辑/切换状态/删除/重置密码、显示已删除用户复选框 |
+| 系统工具 | 用户管理 |
+|:---:|:---:|
+| ![系统工具](Images/SystemComfigTool.png) | ![用户管理](Images/UserManagement.png) |
+| 系统控制（初始化运动控制卡/热加载配置/保存配置）、模拟模式切换、运维工具（导出黑匣子/清空日志/系统诊断） | 用户列表（用户名/全名/角色/状态/创建时间/失败次数/删除标记）、添加/编辑/切换状态/删除/重置密码、显示已删除用户复选框 |
 
 ### 调试工具箱
 
@@ -82,12 +82,17 @@
 | ![轴控制](Images/DebugAxis.png) | ![Modbus调试](Images/DebugModbus.png) |
 | 设备选择、轴号/轴状态/当前位置/当前速度显示、回零/定位/点动+/点动-/停止轴/使能/去使能/复位报警按钮 | 写寄存器（地址/类型/字节序/值）、写线圈（地址/ON/OFF）、读寄存器（地址/数量/结果显示） |
 
-| 设备控制 | 系统模式 |
+| 设备控制 | 视觉触发调试 |
 |:---:|:---:|
-| ![设备控制](Images/DebugCtlDevice.png) | ![系统模式](Images/DebugInfo.png) |
-| 单设备控制（启动设备/停止设备/配置）、Modbus 连接/断开 | 系统模式切换（模拟↔真实）、热加载配置、保存配置、导出黑匣子 |
+| ![设备控制](Images/DebugCtlDevice.png) | ![视觉触发](Images/DebugCamera.png) |
+| 单设备控制（启动设备/停止设备/配置）、Modbus 连接/断开 | 视觉服务器配置（IP/端口/超时）、触发拍照按钮、状态显示（就绪/触发中/成功/失败） |
 
-> 💡 调试工具箱还包含 **视觉触发调试** 选项卡，用于手动测试 `TriggerVision` 命令与视觉服务器的通信。
+> 💡 调试工具箱还包含 **系统模式** 选项卡（见下图），用于模拟/真实切换、热加载配置、保存配置、导出黑匣子。
+
+| 系统模式 |
+|:---:|
+| ![系统模式](Images/DebugSystemComfig.png) |
+| 系统模式切换（模拟↔真实）、热加载配置、保存配置、导出黑匣子 |
 
 ---
 
@@ -103,7 +108,7 @@
 | **工作流引擎** | JSON 配置顺序命令（Home、MoveAbs、WaitIO、Delay、TriggerVision、WriteSignal、WaitSignal），动态加载，多设备复用 | ✅ |
 | **视觉触发命令** | 通过 Modbus 触发视觉服务器拍照，自动等待结果并解析状态码 | ✅ |
 | **跨设备信号交互** | 在工作流中读写其他设备的 Modbus 线圈，实现设备间联锁 | ✅ |
-| **设备-工作流绑定** | 设备可预先绑定工作流，支持“全部启动”一键运行各设备配方 | ✅ |
+| **设备-工作流绑定** | 设备可预先绑定工作流，支持"全部启动"一键运行各设备配方 | ✅ |
 | **实时监控** | 后台多线程高频轮询轴位置/速度/加速度及 Modbus 数据，趋势图实时更新 | ✅ |
 | **黑匣子缓冲区** | 内存循环存储最近 30000 条监控记录，一键导出为文本文件 | ✅ |
 | **双日志系统** | 操作日志与监控日志分栏显示，按日期/大小滚动落盘，自动清理过期文件 | ✅ |
@@ -113,7 +118,7 @@
 | **模拟/真实切换** | 无需硬件即可在模拟模式下完整运行，一键切换时自动检测固高卡 | ✅ |
 | **设备看门狗** | 每台设备独立看门狗，监控 Modbus 通信健康状态，超时自动重连或报警 | ✅ |
 | **配置导入导出** | 设备配置可导出为 `devices.json` 文件，支持导入恢复 | ✅ |
-| **调试工具箱** | 独立调试窗体，支持轴控、Modbus 读写、设备启停、系统模式切换、黑匣子导出 | ✅ |
+| **调试工具箱** | 独立调试窗体，支持轴控、Modbus 读写、设备启停、系统模式切换、视觉触发调试、黑匣子导出 | ✅ |
 
 ---
 
@@ -349,19 +354,21 @@ GtsTest/
 ├── README.md
 ├── LICENSE
 ├── Images/                           # 界面截图
-│   ├── main.png
-│   ├── login.png
-│   ├── DeviceSte.png
-│   ├── ModbusSte.png
-│   ├── Workflow.png
-│   ├── MqttControl.png
-│   ├── OpcUa.png
-│   ├── SystemConfigTool.png
-│   ├── UserManagement.png
-│   ├── DebugAxis.png
-│   ├── DebugModbus.png
-│   ├── DebugCtlDevice.png
-│   └── DebugInfo.png
+│   ├── main.png                      # 主操作界面
+│   ├── login.png                     # 登录界面
+│   ├── DeviceSte.png                 # 添加设备配置
+│   ├── ModbusSte.png                 # Modbus 高级配置
+│   ├── Workflow.png                  # 工作流（主界面）
+│   ├── WorkSystemComfig.png          # 工作流编辑（系统配置中心）
+│   ├── MqttSystemComfig.png          # MQTT 通信
+│   ├── OpcUaSystemComfig.png         # OPC UA 通信
+│   ├── SystemComfigTool.png          # 系统工具
+│   ├── UserManagement.png            # 用户管理
+│   ├── DebugAxis.png                 # 调试工具箱-轴控制
+│   ├── DebugModbus.png               # 调试工具箱-Modbus
+│   ├── DebugCtlDevice.png            # 调试工具箱-设备控制
+│   ├── DebugCamera.png               # 调试工具箱-视觉触发
+│   └── DebugSystemComfig.png         # 调试工具箱-系统模式
 │
 └── GtsTest/                          # 源码目录
     ├── GtsTest.csproj
