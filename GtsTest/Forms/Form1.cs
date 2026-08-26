@@ -1,188 +1,147 @@
 ﻿using GtsTest.Controls;
-using GtsTest.Core;
-using GtsTest.Forms;
-using GtsTest.Modbus;
-using GtsTest.Models;
 using GtsTest.Presenters;
-using GtsTest.Services;
-using GtsTest.Services.Alarm;
 using GtsTest.Services.Authentication;
-using GtsTest.Services.Camera;
 using GtsTest.Services.Data;
-using GtsTest.Services.Logging;
 using System;
 using System.Collections.Generic;
 using System.Drawing;
+using System.IO;
 using System.Linq;
 using System.Windows.Forms;
-using System.Windows.Forms.DataVisualization.Charting;
 
 namespace GtsTest
 {
     public partial class Form1 : Form, IGtsView
     {
-        // ---------- 事件（由Presenter订阅） ----------
+        // ---------- 事件 ----------
         public event EventHandler LoadView;
+        public event EventHandler DeviceSelected;
         public event EventHandler AddDeviceClicked;
         public event EventHandler RemoveDeviceClicked;
         public event EventHandler StartAllClicked;
         public event EventHandler StopAllClicked;
-        public event EventHandler EmergencyStopClicked;
+        public event EventHandler StartSelectedClicked;
+        public event EventHandler StopSelectedClicked;
+        public event EventHandler ResetDeviceClicked;
         public event EventHandler AlarmResetClicked;
-        public event EventHandler RunWorkflowClicked;
-        public event EventHandler StopWorkflowClicked;
-        public event EventHandler ToggleSimulatorClicked;
-        public event EventHandler ToggleModbusClicked;
-        public event EventHandler ConnectAllModbusClicked;
-        public event EventHandler DisconnectAllModbusClicked;
-        public event EventHandler SaveConfigClicked;
         public event EventHandler AlarmAcknowledgeClicked;
         public event EventHandler AlarmResolveClicked;
+        public event EventHandler EmergencyStopClicked;
+        public event EventHandler SystemConfigClicked;
+        public event EventHandler LoginClicked;
+        public event EventHandler<string> WorkflowRunClicked;
+        public event EventHandler WorkflowStopClicked;
+        public event EventHandler<string> DeviceForWorkflowSelected;
+        public event EventHandler ProductionResetClicked;
+        public event EventHandler BindDeviceWorkflowClicked;   // ★★★ 新增 ★★★
 
         // ---------- 私有字段 ----------
         private GtsPresenter _presenter;
         private readonly IDataRepository _repo;
         private readonly IAuthenticationService _authService;
-        private readonly GtsModel _model;
-        private readonly DeviceManager _deviceManager;
-        private readonly IAlarmManager _alarmManager;
         private bool _isSelectingDevice = false;
-        private Dictionary<string, Chart> _deviceCharts = new();
-
-        // 相机 MVP 组件
-        private CameraPresenter _cameraPresenter;
-        private MqttPresenter _mqttPresenter;
 
         // ---------- 构造函数 ----------
         public Form1(IDataRepository repo, IAuthenticationService authService)
         {
             InitializeComponent();
+
             _repo = repo;
             _authService = authService;
 
-            // 创建核心服务
-            _model = new GtsModel();
-            _deviceManager = new DeviceManager(_model);
-            _alarmManager = _deviceManager.AlarmManager;
-            var logger = new AppLoggerWrapper();
+            // ---- 创建核心模型和管理器 ----
+            var model = new GtsTest.Core.GtsModel();
+            var deviceManager = new GtsTest.Core.DeviceManager(model);
+            var logger = new GtsTest.Services.Logging.AppLoggerWrapper();
+            var alarmManager = deviceManager.AlarmManager;
 
-            // 创建主 Presenter
+            // ---- 注入到 overviewControl ----
+            overviewControl.SetDeviceManager(deviceManager, alarmManager);
+
+            // ---- 创建 Presenter ----
             _presenter = new GtsPresenter(
                 this,
-                _model,
-                _deviceManager,
+                model,
+                deviceManager,
                 logger,
                 repo,
-                _alarmManager,
-                null,
-                null,
-                null,
+                alarmManager,
                 authService
             );
 
-            // ---------- 初始化用户控件（放到对应Tab页） ----------
-            // 1. 产线总览
-            this.overviewControl = new OverviewControl(_deviceManager, _alarmManager);
-            this.overviewControl.Dock = DockStyle.Fill;
-            this.tabPageOverview.Controls.Add(this.overviewControl);
-
-            // 2. 视觉检测（相机 MVP 装配）
-            this.cameraControl = new CameraControl();
-            this.cameraControl.Dock = DockStyle.Fill;
-            this.tabPageCamera.Controls.Add(this.cameraControl);
-
-            // 创建相机服务（目前为模拟，可替换为真实实现）
-            var cameraService = new RealCameraService();
-            // 创建相机 Presenter
-            _cameraPresenter = new CameraPresenter(this.cameraControl, cameraService);
-            // 释放资源（窗体关闭时）
-            this.FormClosing += (s, e) => _cameraPresenter?.Dispose();
-
-            // 3. 工作流配置
-            this.workflowControl = new WorkflowControl(_model, _deviceManager);
-            this.workflowControl.Dock = DockStyle.Fill;
-            this.tabPageWorkflow.Controls.Add(this.workflowControl);
-
-            // 4. 通信中心
-            this.communicationControl = new CommunicationControl();
-            this.communicationControl.Dock = DockStyle.Fill;
-            this.tabPageComm.Controls.Add(this.communicationControl);
-
-            // 5. MQTT
-            this.mqttControl = new MqttControl();
-            this.mqttControl.Dock = DockStyle.Fill;
-            this.tabPageMqtt.Controls.Add(this.mqttControl);
-
-            // ✅ 创建 MQTT Presenter（连接 View 和 Service）
-            var mqttService = new MqttService();
-            this._mqttPresenter = new MqttPresenter(this.mqttControl, mqttService);
-            this.FormClosing += (s, e) => this._mqttPresenter?.Dispose();
-
-            // ---------- 绑定 UI 事件 ----------
-            this.Load += (s, e) => LoadView?.Invoke(s, e);
-
-            // 设备管理
-            btnAddDevice.Click += (s, e) => AddDeviceClicked?.Invoke(s, e);
-            btnRemoveDevice.Click += (s, e) => RemoveDeviceClicked?.Invoke(s, e);
-
-            // 产线控制
-            btnStartAll.Click += (s, e) => StartAllClicked?.Invoke(s, e);
-            btnStopAll.Click += (s, e) => StopAllClicked?.Invoke(s, e);
-            btnEmergencyStop.Click += (s, e) => EmergencyStopClicked?.Invoke(s, e);
-            btnResetAlarm.Click += (s, e) => AlarmResetClicked?.Invoke(s, e);
-
-            // 流程控制
-            btnRunFlow.Click += (s, e) => RunWorkflowClicked?.Invoke(s, e);
-            btnStopFlow.Click += (s, e) => StopWorkflowClicked?.Invoke(s, e);
-
-            // Modbus 连接管理
-            btnToggleModbus.Click += (s, e) => ToggleModbusClicked?.Invoke(s, e);
-            btnConnectAll.Click += (s, e) => ConnectAllModbusClicked?.Invoke(s, e);
-            btnDisconnectAll.Click += (s, e) => DisconnectAllModbusClicked?.Invoke(s, e);
-            btnSaveConfig.Click += (s, e) => SaveConfigClicked?.Invoke(s, e);
-
-            // 模拟模式切换
-            btnToggleSim.Click += (s, e) => ToggleSimulatorClicked?.Invoke(s, e);
-
-            // 调试工具箱
-            btnDebugToolbox.Click += BtnDebugToolbox_Click;
-
-            // 登录/注销
-            btnLogin.Click += BtnLogin_Click;
-
-            // 报警确认/解决（在 ListView 中通过右键菜单或双击实现）
-            // 这里我们使用双击报警项来触发确认，演示绑定
-            listViewAlarms.DoubleClick += (s, e) => AlarmAcknowledgeClicked?.Invoke(s, e);
-            // 也可以添加一个右键菜单项，但先简单处理
-
-            // 设备列表选择变化
-            listBoxDevices.SelectedIndexChanged += (s, e) =>
+            // ---- 初始化生产执行控件的下拉列表 ----
+            string workflowsDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Workflows");
+            if (Directory.Exists(workflowsDir))
             {
-                if (listBoxDevices.SelectedItem is DeviceListItem item)
+                var workflowFiles = Directory.GetFiles(workflowsDir, "*.json");
+                var workflowNames = workflowFiles.Select(f => Path.GetFileNameWithoutExtension(f)).ToList();
+                workflowExecutionControl.SetWorkflowList(workflowNames);
+            }
+            else
+            {
+                Directory.CreateDirectory(workflowsDir);
+                workflowExecutionControl.SetWorkflowList(new List<string> { "Default" });
+            }
+            workflowExecutionControl.LoadWorkflowPreview();
+
+            // 订阅生产执行控件事件
+            workflowExecutionControl.ExecuteClicked += (s, workflowName) => WorkflowRunClicked?.Invoke(s, workflowName);
+            workflowExecutionControl.StopClicked += (s, e) => WorkflowStopClicked?.Invoke(s, e);
+            workflowExecutionControl.ResetClicked += (s, e) => ResetDeviceClicked?.Invoke(s, e);
+            workflowExecutionControl.ProductionResetClicked += (s, e) => ProductionResetClicked?.Invoke(s, e);
+            workflowExecutionControl.DeviceSelected += (s, deviceId) => DeviceForWorkflowSelected?.Invoke(s, deviceId);
+            workflowExecutionControl.BindClicked += (s, e) => BindDeviceWorkflowClicked?.Invoke(s, e);
+
+            // 设置 ListBox 绘制
+            listBoxDevices.DrawItem += ListBoxDevices_DrawItem;
+
+            // 键盘快捷键
+            this.KeyPreview = true;
+            this.KeyDown += (s, e) =>
+            {
+                if ((e.Control && e.KeyCode == Keys.E) || e.KeyCode == Keys.Escape)
                 {
-                    _presenter.OnDeviceSelected(item.DeviceId);
+                    EmergencyStopClicked?.Invoke(this, EventArgs.Empty);
+                    e.Handled = true;
                 }
             };
 
-            // 订阅用户会话变更
-            SessionManager.OnUserChanged += OnUserChanged;
-
-            // 初始化界面状态
-            UpdateUIByLoginState(null);
-
-            // 设置 ListBox 显示属性
-            listBoxDevices.DisplayMember = "Name";
+            SetupToolTips();
         }
 
-        // ---------- 辅助方法 ----------
-        private void SyncListBoxSelection(string deviceId)
+        // ==================== 实现 IGtsView ====================
+
+        public void UpdateDeviceList(IEnumerable<DeviceListItem> items)
         {
+            if (InvokeRequired)
+            {
+                BeginInvoke(new Action(() => UpdateDeviceList(items)));
+                return;
+            }
+
+            listBoxDevices.Items.Clear();
+            foreach (var item in items)
+            {
+                listBoxDevices.Items.Add(item);
+            }
+
+            workflowExecutionControl.SetDeviceList(items);
+        }
+
+        public void SelectDevice(string deviceId)
+        {
+            if (InvokeRequired)
+            {
+                BeginInvoke(new Action(() => SelectDevice(deviceId)));
+                return;
+            }
+
             _isSelectingDevice = true;
             try
             {
                 for (int i = 0; i < listBoxDevices.Items.Count; i++)
                 {
-                    if (((DeviceListItem)listBoxDevices.Items[i]).DeviceId == deviceId)
+                    if (listBoxDevices.Items[i] is DeviceListItem item && item.DeviceId == deviceId)
                     {
                         listBoxDevices.SelectedIndex = i;
                         break;
@@ -195,123 +154,47 @@ namespace GtsTest
             }
         }
 
-        // ---------- 调试工具箱 ----------
-        private void BtnDebugToolbox_Click(object sender, EventArgs e)
-        {
-            using (var toolbox = new DebugToolboxForm(
-                _deviceManager,
-                _model,
-                _alarmManager,
-                _repo,
-                _authService))
-            {
-                toolbox.ShowDialog(this);
-            }
-        }
-
-        // ---------- 登录/注销 ----------
-        private void BtnLogin_Click(object sender, EventArgs e)
-        {
-            if (SessionManager.IsLoggedIn)
-            {
-                SessionManager.Logout(_repo);
-                return;
-            }
-
-            using (var login = new LoginForm(_authService, _repo))
-            {
-                if (login.ShowDialog() == DialogResult.OK)
-                {
-                    // SessionManager 已触发 OnUserChanged
-                }
-            }
-        }
-
-        // ---------- 用户会话变更 ----------
-        private void OnUserChanged(User user)
-        {
-            UpdateUIByLoginState(user);
-        }
-
-        private void UpdateUIByLoginState(User user)
-        {
-            bool isLoggedIn = user != null;
-            if (isLoggedIn)
-            {
-                lblLoggedUser.Text = $"当前用户：{user.FullName} ({user.Role})";
-                btnLogin.Text = "注销";
-                btnLogin.ForeColor = System.Drawing.Color.Black;
-            }
-            else
-            {
-                lblLoggedUser.Text = "未登录";
-                btnLogin.Text = "登录";
-                btnLogin.ForeColor = System.Drawing.Color.Gray;
-            }
-
-            // 根据权限更新控件启用状态
-            bool hasStart = _authService.HasPermission(user, "Device.Start");
-            btnStartAll.Enabled = hasStart;
-            bool hasEdit = _authService.HasPermission(user, "Config.Edit");
-            btnAddDevice.Enabled = hasEdit;
-            btnRemoveDevice.Enabled = hasEdit;
-            btnSaveConfig.Enabled = hasEdit;
-            bool hasAck = _authService.HasPermission(user, "Alarm.Acknowledge");
-            // 报警双击确认已由 Presenter 处理，此处可启用/禁用双击行为，但未设置，暂留空
-        }
-
-        // ---------- 实现 IGtsView ----------
-        public void UpdateDeviceList(IEnumerable<DeviceListItem> items)
-        {
-            listBoxDevices.Items.Clear();
-            foreach (var item in items)
-            {
-                listBoxDevices.Items.Add(item);
-            }
-            listBoxDevices.Invalidate();
-        }
-
-        public void SelectDevice(string deviceId)
-        {
-            SyncListBoxSelection(deviceId);
-        }
-
         public string GetSelectedDeviceId()
         {
+            if (InvokeRequired)
+            {
+                return (string)Invoke(new Func<string>(GetSelectedDeviceId));
+            }
+
             if (listBoxDevices.SelectedItem is DeviceListItem item)
                 return item.DeviceId;
             return "";
         }
 
-        public void UpdateCurrentDevice(string deviceName)
+        public string GetSelectedDeviceName()
         {
-            // 状态栏已有设备名称显示，由 UpdateStatusBar 负责
+            if (InvokeRequired)
+            {
+                return (string)Invoke(new Func<string>(GetSelectedDeviceName));
+            }
+            return workflowExecutionControl?.GetSelectedDeviceName() ?? "";
         }
 
-        public void UpdateDeviceData(string deviceId, object data)
+        public string GetSelectedWorkflowName()
         {
-            // 已无设备详情Tab，但可转发给 OverviewControl（如需要）
-            // 目前仅保留空实现
-        }
-
-        public void UpdateDeviceStep(string deviceId, string step)
-        {
-            // 转发给 OverviewControl 可刷新卡片步骤信息
-            // 但 OverviewControl 自身定时刷新，暂不处理
-        }
-
-        public void UpdateDeviceProduction(string deviceId, int current, int target)
-        {
-            // 同样由 OverviewControl 定时刷新
+            if (InvokeRequired)
+            {
+                return (string)Invoke(new Func<string>(GetSelectedWorkflowName));
+            }
+            return workflowExecutionControl?.GetSelectedWorkflowName() ?? "";
         }
 
         public void UpdateDeviceOnlineStatus(string deviceId, bool isOnline)
         {
-            // 更新 ListBox
+            if (InvokeRequired)
+            {
+                BeginInvoke(new Action(() => UpdateDeviceOnlineStatus(deviceId, isOnline)));
+                return;
+            }
+
             for (int i = 0; i < listBoxDevices.Items.Count; i++)
             {
-                var item = (DeviceListItem)listBoxDevices.Items[i];
-                if (item.DeviceId == deviceId)
+                if (listBoxDevices.Items[i] is DeviceListItem item && item.DeviceId == deviceId)
                 {
                     item.IsOnline = isOnline;
                     listBoxDevices.Items[i] = item;
@@ -321,116 +204,144 @@ namespace GtsTest
             }
         }
 
-        public void UpdateAxisInfo(string deviceId, short axis, bool isOnline, double pos, double vel)
+        public void UpdateDeviceProduction(string deviceId, int current, int target) { }
+        public void UpdateDeviceStep(string deviceId, string step) { }
+        public void UpdateDeviceData(string deviceId, object data) { }
+        public void UpdateGlobalStats(int onlineCount, int totalCount, int totalProduction) { }
+
+        public void UpdateStatusBar(string deviceName, bool isOnline, bool servoOn,
+            string limitStatus, bool modbusConnected, string currentStep,
+            int watchdogRemainingMs, bool watchdogTimeout)
         {
-            // 已无轴信息显示，留空
+            if (InvokeRequired)
+            {
+                BeginInvoke(new Action(() => UpdateStatusBar(deviceName, isOnline, servoOn,
+                    limitStatus, modbusConnected, currentStep, watchdogRemainingMs, watchdogTimeout)));
+                return;
+            }
+
+            var items = statusStrip.Items;
+            if (items.Count >= 6)
+            {
+                items[0].Text = $"设备: {deviceName} {(isOnline ? "●在线" : "○离线")}";
+                items[0].ForeColor = isOnline ? Color.Green : Color.Red;
+                items[1].Text = servoOn ? "伺服: 已使能" : "伺服: 未使能";
+                items[1].ForeColor = servoOn ? Color.Green : Color.Orange;
+                items[2].Text = $"限位: {limitStatus}";
+                items[2].ForeColor = limitStatus.Contains("限位") ? Color.Red : Color.Green;
+                items[3].Text = watchdogTimeout ? "看门狗: 超时!" : $"看门狗: 正常 ({watchdogRemainingMs}ms)";
+                items[3].ForeColor = watchdogTimeout ? Color.Red : Color.Green;
+                items[4].Text = modbusConnected ? "Modbus: 已连接" : "Modbus: 未连接";
+                items[4].ForeColor = modbusConnected ? Color.Green : Color.Red;
+                items[5].Text = $"当前指令: {currentStep}";
+            }
         }
 
-        public void UpdateGlobalStats(int onlineCount, int totalCount, int totalProduction)
-        {
-            lblOnlineCount.Text = $"在线: {onlineCount}/{totalCount}";
-            lblTotalProduction.Text = $"总产量: {totalProduction}";
-            lblTotalProdValue.Text = totalProduction.ToString();
-            // 良品率暂未实现，保持为0%
-        }
+        public void UpdateAlarmList(IEnumerable<AlarmRecord> alarms) { }
+        public string GetSelectedAlarmId() => "";
 
         public void AppendOperationLog(string message)
         {
+            if (txtOperationLog.InvokeRequired)
+            {
+                txtOperationLog.BeginInvoke(new Action(() => AppendOperationLog(message)));
+                return;
+            }
             txtOperationLog.AppendText(message + Environment.NewLine);
+            if (txtOperationLog.Lines.Length > 500)
+            {
+                var lines = txtOperationLog.Lines;
+                txtOperationLog.Lines = lines[100..];
+            }
+            txtOperationLog.ScrollToCaret();
         }
 
         public void AppendMonitorLog(string message)
         {
+            if (txtMonitorLog.InvokeRequired)
+            {
+                txtMonitorLog.BeginInvoke(new Action(() => AppendMonitorLog(message)));
+                return;
+            }
             txtMonitorLog.AppendText(message + Environment.NewLine);
+            if (txtMonitorLog.Lines.Length > 500)
+            {
+                var lines = txtMonitorLog.Lines;
+                txtMonitorLog.Lines = lines[100..];
+            }
+            txtMonitorLog.ScrollToCaret();
         }
 
         public void ClearLogs()
         {
+            if (txtOperationLog.InvokeRequired)
+            {
+                txtOperationLog.BeginInvoke(new Action(ClearLogs));
+                return;
+            }
             txtOperationLog.Clear();
             txtMonitorLog.Clear();
         }
 
-        public void SetSimulationMode(bool isSimulation)
+        public void AppendExecutionLog(string message)
         {
-            btnToggleSim.Text = isSimulation ? "切换到真实" : "切换到模拟";
-            btnToggleSim.BackColor = isSimulation ? Color.LightGreen : Color.LightGray;
+            if (InvokeRequired)
+            {
+                BeginInvoke(new Action(() => AppendExecutionLog(message)));
+                return;
+            }
+            workflowExecutionControl?.AppendLog(message);
         }
 
-        public void UpdateStatusBar(string deviceName, bool isOnline, bool servoOn,
-                                     string limitStatus, bool modbusConnected, string currentStep,
-                                     int watchdogRemainingMs, bool watchdogTimeout)
+        public void SetSimulationMode(bool isSimulation) { }
+
+        public void UpdateUIByPermissions(string role)
         {
-            if (string.IsNullOrEmpty(deviceName))
+            if (InvokeRequired)
             {
-                lblDeviceStatus.Text = "设备: 未选择"; lblDeviceStatus.ForeColor = Color.Gray;
-                lblServoStatus.Text = "伺服: --"; lblServoStatus.ForeColor = Color.Gray;
-                lblLimitStatus.Text = "限位: --"; lblLimitStatus.ForeColor = Color.Gray;
-                lblModbusStatusStrip.Text = "Modbus: --"; lblModbusStatusStrip.ForeColor = Color.Gray;
-                lblCurrentCmd.Text = "当前指令: 空闲";
-                lblWatchdogStatus.Text = "🐕看门狗: 未启动"; lblWatchdogStatus.ForeColor = Color.Gray;
+                BeginInvoke(new Action(() => UpdateUIByPermissions(role)));
                 return;
             }
 
-            lblDeviceStatus.Text = $"设备: {deviceName} {(isOnline ? "●在线" : "○离线")}";
-            lblDeviceStatus.ForeColor = isOnline ? Color.Green : Color.Red;
-            lblServoStatus.Text = servoOn ? "伺服: 已使能" : "伺服: 未使能";
-            lblServoStatus.ForeColor = servoOn ? Color.Green : Color.Orange;
-            lblLimitStatus.Text = $"限位: {limitStatus}";
-            lblLimitStatus.ForeColor = limitStatus.Contains("限位") ? Color.Red : Color.Green;
-            lblModbusStatusStrip.Text = modbusConnected ? "Modbus: 已连接" : "Modbus: 未连接";
-            lblModbusStatusStrip.ForeColor = modbusConnected ? Color.Green : Color.Red;
-            lblCurrentCmd.Text = $"当前指令: {currentStep}";
+            bool isLoggedIn = !string.IsNullOrEmpty(role) && role != "未登录";
+            bool isAdmin = string.Equals(role, "Admin", StringComparison.OrdinalIgnoreCase);
+            bool isEngineer = string.Equals(role, "Engineer", StringComparison.OrdinalIgnoreCase) || isAdmin;
 
-            if (watchdogTimeout)
+            btnAddDevice.Enabled = isLoggedIn && isEngineer;
+            btnRemoveDevice.Enabled = isLoggedIn && isEngineer;
+
+            btnStartAll.Enabled = isLoggedIn;
+            btnStopAll.Enabled = isLoggedIn;
+            btnStartSelected.Enabled = isLoggedIn;
+            btnStopSelected.Enabled = isLoggedIn;
+            btnResetDevice.Enabled = isLoggedIn;
+
+            btnSystemConfig.Visible = isLoggedIn && isEngineer;
+            btnSystemConfig.Enabled = isLoggedIn && isEngineer;
+
+            btnResetAlarm.Enabled = isLoggedIn;
+            btnEmergencyStop.Enabled = true;
+
+            if (isLoggedIn)
             {
-                lblWatchdogStatus.Text = "🐕看门狗: 超时!"; lblWatchdogStatus.ForeColor = Color.Red;
-            }
-            else if (watchdogRemainingMs > 0)
-            {
-                lblWatchdogStatus.Text = $"🐕看门狗: 正常 ({watchdogRemainingMs}ms)";
-                lblWatchdogStatus.ForeColor = watchdogRemainingMs > 1000 ? Color.Green : Color.Orange;
+                lblUserInfo.Text = $"👤 {role}";
+                btnLogin.Text = "登出";
             }
             else
             {
-                lblWatchdogStatus.Text = "🐕看门狗: 未启动"; lblWatchdogStatus.ForeColor = Color.Gray;
+                lblUserInfo.Text = "未登录";
+                btnLogin.Text = "登录";
             }
 
-            btnToggleModbus.Text = modbusConnected ? "断开 Modbus" : "连接 Modbus";
-            btnToggleModbus.BackColor = modbusConnected ? Color.LightCoral : SystemColors.Control;
+            workflowExecutionControl?.SetPermissions(isLoggedIn, isEngineer);
         }
 
-        public void UpdateAlarmList(IEnumerable<AlarmRecord> alarms)
+        private void SetupToolTips()
         {
-            listViewAlarms.Items.Clear();
-            foreach (var alarm in alarms)
-            {
-                var item = new ListViewItem(alarm.Id.ToString());
-                item.SubItems.Add(alarm.DeviceId ?? "");
-                item.SubItems.Add(alarm.Message);
-                item.SubItems.Add(alarm.Severity.ToString());
-                item.SubItems.Add(alarm.Timestamp.ToString("yyyy-MM-dd HH:mm:ss"));
-                item.SubItems.Add(alarm.IsResolved ? "已解决" : (alarm.IsAcknowledged ? "已确认" : "未确认"));
-                switch (alarm.Severity)
-                {
-                    case AlarmSeverity.Critical: item.ForeColor = Color.Red; break;
-                    case AlarmSeverity.Error: item.ForeColor = Color.DarkOrange; break;
-                    case AlarmSeverity.Warning: item.ForeColor = Color.Goldenrod; break;
-                    default: item.ForeColor = Color.Black; break;
-                }
-                listViewAlarms.Items.Add(item);
-            }
-
-            // 更新统计面板中的报警数
-            int activeCount = alarms.Count(a => !a.IsResolved);
-            lblAlarmCountValue.Text = activeCount.ToString();
-            lblAlarmCountValue.ForeColor = activeCount > 0 ? Color.Red : Color.Green;
-        }
-
-        public string GetSelectedAlarmId()
-        {
-            if (listViewAlarms.SelectedItems.Count > 0)
-                return listViewAlarms.SelectedItems[0].Text;
-            return "";
+            ToolTip toolTip = new ToolTip();
+            toolTip.SetToolTip(btnResetAlarm, "确认并解决所有设备的当前活动报警\n（报警已处理后的确认操作）");
+            toolTip.SetToolTip(btnResetDevice, "重置选中设备的工作流状态\n• 软复位：从断点继续，保留产量\n• 硬复位：产量归零，从头开始");
+            toolTip.SetToolTip(btnSystemConfig, "打开系统配置中心（工程师/管理员权限）");
         }
 
         public void ShowMessage(string text, string caption, MessageType type)
@@ -450,36 +361,31 @@ namespace GtsTest
             return MessageBox.Show(text, caption, MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes;
         }
 
-        // ---------- 自定义绘制 ----------
         private void ListBoxDevices_DrawItem(object sender, DrawItemEventArgs e)
         {
             if (e.Index < 0) return;
             e.DrawBackground();
-            var item = (DeviceListItem)listBoxDevices.Items[e.Index];
+
+            if (listBoxDevices.Items[e.Index] is not DeviceListItem item) return;
+
             Color statusColor = item.IsOnline ? Color.Green : Color.Red;
-            e.Graphics.FillEllipse(new SolidBrush(statusColor), e.Bounds.X + 5, e.Bounds.Y + 5, 10, 10);
+
             using (var brush = new SolidBrush(e.ForeColor))
+            using (var statusBrush = new SolidBrush(statusColor))
+            {
+                e.Graphics.FillEllipse(statusBrush, e.Bounds.X + 5, e.Bounds.Y + 5, 10, 10);
                 e.Graphics.DrawString(item.Name, e.Font, brush, e.Bounds.X + 22, e.Bounds.Y + 2);
+            }
+
             e.DrawFocusRectangle();
         }
 
-        // ---------- 兼容方法（保留，可能被外部调用） ----------
-        public void ShowResult(string message) => AppendOperationLog(message);
-        public void ClearResult() => ClearLogs();
-        public void SetSimulationModeUI(bool isSimulation) => SetSimulationMode(isSimulation);
-
-        // ---------- 释放资源 ----------
         protected override void Dispose(bool disposing)
         {
             if (disposing)
             {
-                // 释放相机 Presenter
-                _cameraPresenter?.Dispose();
-                // 释放其他控件
-                overviewControl?.Dispose();
-                workflowControl?.Dispose();
-                communicationControl?.Dispose();
                 components?.Dispose();
+                _presenter = null;
             }
             base.Dispose(disposing);
         }

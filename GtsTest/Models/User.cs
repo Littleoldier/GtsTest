@@ -19,5 +19,10 @@ namespace GtsTest.Models
         // 可扩展：FailedAttempts、LockoutUntil 等
         public int FailedAttempts { get; set; } = 0;
         public string? LockoutUntil { get; set; } = null;
+
+        // ---- 逻辑删除字段 ----
+        public int IsDeleted { get; set; } = 0;         // 0=正常, 1=已删除
+        public string? DeletedTime { get; set; }
+        public string? DeletedBy { get; set; }
     }
 }

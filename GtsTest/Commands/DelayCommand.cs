@@ -15,8 +15,8 @@ namespace GtsTest.Commands
 
         protected override void ExecuteCore(CancellationToken ct)
         {
-            // 直接利用 WaitForCondition 的等待机制
-            WaitForCondition(() => false, _delayMs, ct);
+            if (_delayMs > 0)
+                Task.Delay(_delayMs, ct).Wait(ct);
         }
     }
 }

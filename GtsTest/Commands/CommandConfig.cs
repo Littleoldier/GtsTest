@@ -13,6 +13,21 @@ namespace GtsTest.Commands
         public bool ExpectValue { get; set; } = true;   // 期望 IO 值（WaitIO 用）
         public int DelayMs { get; set; } = 500;         // 延时毫秒（Delay 用）
         public double Vel { get; set; } = 10;           // 速度
-        public double Acc { get; set; } = 5;            // 加速度
+        public double Acc { get; set; } = 5;            // 加速度+
+
+        // ========== 🆕 新增：跨设备信号交互字段 ==========
+        public string TargetDevice { get; set; } = "";   // 目标设备 ID（如 "dev-002"）
+        public int SignalAddress { get; set; } = 0;      // 线圈地址
+        public bool SignalValue { get; set; } = true;    // 期望值 / 写入值
+
+        // ========== 视觉命令配置 ==========
+        public string VisionServerIp { get; set; } = "127.0.0.1";
+        public int VisionServerPort { get; set; } = 503;
+        public int TriggerCoilAddress { get; set; } = 100;
+        public int BusyCoilAddress { get; set; } = 101;
+        public int ResultCoilAddress { get; set; } = 102;
+        public int ResultCodeRegister { get; set; } = 1000;
+        public int FileNameRegisterStart { get; set; } = 1001;
+        public int VisionTimeoutMs { get; set; } = 10000;
     }
 }

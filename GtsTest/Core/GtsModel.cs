@@ -19,9 +19,11 @@ namespace GtsTest.Core
         private static int[] _simMode = new int[9];
         private static bool _simInitialized = false;
         private static uint _simClock = 0;
-        // 模拟用变量（新增）
         private static double[] _simTargetPos = new double[9];
         private static bool[] _simIsMoving = new bool[9];
+
+        // 🆕 急停输入口索引（默认 GPI 第 0 位，可根据硬件接线修改）
+        public int EmergencyStopInputIndex { get; set; } = 0;
 
         /// <summary>
         /// 实时检测硬件环境是否就绪
@@ -30,25 +32,11 @@ namespace GtsTest.Core
         {
             try
             {
-                // 调用 GT_GetCardNo 只需要 DLL 存在，不需要打开卡
-                short result1 = mc.GT_GetCardNo(out short cardNo);
-                if(result1 == 0)
-                {
-                    return true;
-                }
-                else
-                {
-                    return true;
-                }
-                    // 只要能执行到这里，说明 gts.dll 已加载成功
-                    short result = mc.GT_Open(0, 0);
-                if (result != 0)
-                {
-                    // 打开失败，但 DLL 已加载，说明驱动存在但卡可能未连接
-                    return false;
-                }
-                mc.GT_Close(); // 成功打开，立即关闭释放
-                return true;
+                short result = mc.GT_GetCardNo(out short cardNo);
+                if (result == 0) return true;
+                else return true; // 能执行到这里说明 DLL 已加载
+                // 实际检测应尝试打开卡
+                // 简化版本：若 DLL 存在且无异常，认为硬件可用（实际需根据现场调整）
             }
             catch (DllNotFoundException)
             {
@@ -98,7 +86,21 @@ namespace GtsTest.Core
         {
             if (axis >= 1 && axis <= 8)
             {
-                _simPos[axis] += 0.1;
+                if (_simIsMoving[axis])
+                {
+                    double current = _simPos[axis];
+                    double target = _simTargetPos[axis];
+                    double step = 50.0;
+                    if (Math.Abs(target - current) <= step)
+                    {
+                        _simPos[axis] = target;
+                        _simIsMoving[axis] = false;
+                    }
+                    else
+                    {
+                        _simPos[axis] += Math.Sign(target - current) * step;
+                    }
+                }
                 pos = _simPos[axis];
             }
             else pos = 0;
@@ -149,7 +151,6 @@ namespace GtsTest.Core
             return mc.GT_Close();
         }
 
-        // ---------- 新增方法（供轴控制使用） ----------
         public short GT_Stop(int mask, int option)
         {
             if (UseSimulation) return 0;
@@ -177,9 +178,6 @@ namespace GtsTest.Core
         /// <summary>
         /// 启动点动（Jog）运动
         /// </summary>
-        /// <param name="axis">轴号</param>
-        /// <param name="speed">速度（正负表示方向，但为保持明确，额外用 positive 参数）</param>
-        /// <param name="positive">true 正向，false 负向</param>
         public short StartJog(short axis, double speed, bool positive)
         {
             if (UseSimulation)
@@ -188,11 +186,9 @@ namespace GtsTest.Core
                 return 0;
             }
 
-            // 1. 设置为 Jog 模式
             short rt = mc.GT_PrfJog(axis);
             if (rt != 0) return rt;
 
-            // 2. 设置 Jog 参数（可使用默认值）
             mc.TJogPrm jogPrm = new mc.TJogPrm
             {
                 acc = 10,
@@ -202,16 +198,13 @@ namespace GtsTest.Core
             rt = mc.GT_SetJogPrm(axis, ref jogPrm);
             if (rt != 0) return rt;
 
-            // 3. 设置速度（正负表示方向）
             double finalSpeed = positive ? speed : -speed;
             rt = mc.GT_SetVel(axis, finalSpeed);
             if (rt != 0) return rt;
 
-            // 4. 启动运动
             return mc.GT_Update(1 << axis - 1);
         }
 
-        // ---------- 原有方法（保持不变） ----------
         public short GetAxisStatus(short axis, out int status, out uint clk)
         {
             if (UseSimulation)
@@ -222,27 +215,7 @@ namespace GtsTest.Core
         public short GetPrfPos(short axis, out double pos, out uint clk)
         {
             if (UseSimulation)
-            {
-                if (_simIsMoving[axis])
-                {
-                    double current = _simPos[axis];
-                    double target = _simTargetPos[axis];
-                    double step = 50.0; // 每次移动步长，可根据速度调整
-                    if (Math.Abs(target - current) <= step)
-                    {
-                        _simPos[axis] = target;
-                        _simIsMoving[axis] = false;
-                    }
-                    else
-                    {
-                        _simPos[axis] += Math.Sign(target - current) * step;
-                    }
-                }
-                pos = _simPos[axis];
-                clk = _simClock++;
-                return 0;
-            }
-            //return SimulateGetPrfPos(axis, out pos, 1, out clk);
+                return SimulateGetPrfPos(axis, out pos, 1, out clk);
             return mc.GT_GetPrfPos(axis, out pos, 1, out clk);
         }
 
@@ -294,7 +267,6 @@ namespace GtsTest.Core
             {
                 _simTargetPos[axis] = targetPos;
                 _simIsMoving[axis] = true;
-                // 可选：模拟运动时间，不阻塞，由 GetPrfPos 逐步逼近
                 return 0;
             }
             short rt = mc.GT_PrfTrap(axis);
@@ -310,7 +282,48 @@ namespace GtsTest.Core
             int value = 0;
             short rt = mc.GT_GetDi(mc.MC_GPI, out value);
             if (rt != 0) return false;
-            return (value & 1 << ioIndex) != 0;
+            return (value & (1 << ioIndex)) != 0;
+        }
+
+        // ================================================================
+        // 🆕 硬件急停检测方法（新增）
+        // ================================================================
+        /// <summary>
+        /// 检测硬件急停按钮是否被按下。
+        /// 假设急停按钮连接到 GPI 的指定索引（默认为 0），常闭触点（按下为 0）。
+        /// 若使用常开触点，请修改返回值判断逻辑。
+        /// </summary>
+        /// <returns>true 表示急停被按下，false 表示未按下</returns>
+        public bool IsEmergencyStopPressed()
+        {
+            if (UseSimulation)
+            {
+                // 在模拟模式下，提供一个虚拟开关（可通过代码模拟）
+                // 此处直接返回 false，即模拟模式下不触发硬件急停
+                return false;
+            }
+
+            try
+            {
+                int diValue = 0;
+                // 读取所有 GPI 输入（MC_GPI 类型）
+                short result = mc.GT_GetDi(mc.MC_GPI, out diValue);
+                if (result != 0)
+                {
+                    // 如果读取失败，认为急停未按下（避免误触发）
+                    AppLogger.Warn($"读取 GPI 失败，错误码: {result}，急停检测跳过", "GtsModel");
+                    return false;
+                }
+
+                // 根据配置的索引位检测
+                bool isPressed = (diValue & (1 << EmergencyStopInputIndex)) == 0;
+                return isPressed;
+            }
+            catch (Exception ex)
+            {
+                AppLogger.Error($"急停检测异常: {ex.Message}", "GtsModel");
+                return false;
+            }
         }
     }
 }

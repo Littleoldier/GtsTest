@@ -1,5 +1,4 @@
-﻿// Services/AuthenticationService.cs
-using GtsTest.Core;
+﻿using GtsTest.Core;
 using GtsTest.Models;
 using GtsTest.Services.Data;
 using System;
@@ -18,7 +17,7 @@ namespace GtsTest.Services.Authentication
             _repo = repo ?? throw new ArgumentNullException(nameof(repo));
         }
 
-        //注册用户
+        // 注册用户
         public bool RegisterUser(string username, string fullName, string password, string role = "Operator")
         {
             if (string.IsNullOrWhiteSpace(username) || string.IsNullOrWhiteSpace(password))
@@ -55,6 +54,19 @@ namespace GtsTest.Services.Authentication
             if (user == null) return false;
             if (user.IsActive == 0) return false;
 
+            // 检查锁定状态
+            if (!string.IsNullOrEmpty(user.LockoutUntil))
+            {
+                if (DateTime.TryParse(user.LockoutUntil, out var lockoutTime))
+                {
+                    if (DateTime.UtcNow < lockoutTime)
+                    {
+                        AppLogger.Warn($"用户 {username} 已被锁定至 {lockoutTime}", "Auth");
+                        return false;
+                    }
+                }
+            }
+
             // 首先尝试新格式 PBKDF2 验证
             if (AuthenticationHelper.VerifyPassword(password, user.PasswordHash, out bool needsRehash))
             {
@@ -78,7 +90,7 @@ namespace GtsTest.Services.Authentication
                 return true;
             }
 
-            // 兼容旧的 SHA256(salt+password) 格式（若你使用不同的旧格式，请在此调整）
+            // 兼容旧的 SHA256(salt+password) 格式
             if (!string.IsNullOrEmpty(user.Salt))
             {
                 try
@@ -106,7 +118,7 @@ namespace GtsTest.Services.Authentication
                 }
             }
 
-            // 验证失败：增加失败计数（简单示例）
+            // 验证失败：增加失败计数
             IncrementFailedAttempts(user);
             AppLogger.Warn($"用户 {username} 登录失败", "Auth");
             return false;
@@ -160,7 +172,7 @@ namespace GtsTest.Services.Authentication
             var ok = _repo.AddUser(user);
             if (ok)
             {
-                AppLogger.Info("已创建默认管理员帐号 admin（请立即修改密码）", "Auth");
+                AppLogger.Info($"已创建默认管理员帐号 admin（密码: {plain}），请立即修改密码", "Auth");
                 return plain;
             }
             else
@@ -170,7 +182,7 @@ namespace GtsTest.Services.Authentication
             }
         }
 
-        // ----------------- 失败计数/锁定（简单示例） -----------------
+        // ----------------- 失败计数/锁定 -----------------
         private void ResetFailedAttempts(User user)
         {
             try
@@ -197,16 +209,44 @@ namespace GtsTest.Services.Authentication
             catch { }
         }
 
+        // ★★★ 修复：不区分大小写比较角色 ★★★
         public bool HasPermission(User user, string permissionCode)
         {
             if (user == null) return false;
-            // Admin 拥有全部权限
-            if (user.Role == "Admin") return true;
-            // 示例：Operator 只能执行设备启停，不能修改配置
-            if (user.Role == "Operator")
+
+            // 管理员拥有所有权限（不区分大小写）
+            if (string.Equals(user.Role, "Admin", StringComparison.OrdinalIgnoreCase)) return true;
+
+            // 工程师权限（不区分大小写）
+            if (string.Equals(user.Role, "Engineer", StringComparison.OrdinalIgnoreCase))
             {
-                return permissionCode.StartsWith("Device.") || permissionCode == "Device.Start" || permissionCode == "Device.Stop";
+                // 工程师拥有除用户管理外的所有配置权限
+                if (permissionCode == PermissionCodes.UserManage) return false;
+                if (permissionCode == PermissionCodes.AuditView) return false;
+                return true;
             }
+
+            // 操作员权限（不区分大小写）
+            if (string.Equals(user.Role, "Operator", StringComparison.OrdinalIgnoreCase))
+            {
+                return permissionCode switch
+                {
+                    PermissionCodes.DeviceView => true,
+                    PermissionCodes.DeviceStart => true,
+                    PermissionCodes.DeviceStop => true,
+                    PermissionCodes.DeviceStartAll => true,
+                    PermissionCodes.DeviceStopAll => true,
+                    PermissionCodes.DeviceReset => true,
+                    PermissionCodes.WorkflowRun => true,
+                    PermissionCodes.WorkflowStop => true,
+                    PermissionCodes.AlarmReset => true,
+                    PermissionCodes.AlarmAcknowledge => true,
+                    PermissionCodes.AlarmResolve => true,
+                    PermissionCodes.EmergencyStop => true,
+                    _ => false
+                };
+            }
+
             return false;
         }
     }

@@ -1,7 +1,5 @@
-﻿using Microsoft.VisualBasic.ApplicationServices;
-using System.Collections.Generic;
-using System.Threading.Tasks;
-using User = GtsTest.Models.User;
+﻿using System.Collections.Generic;
+using GtsTest.Models;
 
 namespace GtsTest.Services.Data
 {
@@ -11,7 +9,10 @@ namespace GtsTest.Services.Data
         User? GetUserByUsername(string username);
         bool AddUser(User user);
         bool UpdateUser(User user);
-        List<User> GetAllUsers();
+        List<User> GetAllUsers(bool includeDeleted = false);   // 支持查询已删除用户
 
+        // ---- 逻辑删除相关 ----
+        bool SoftDeleteUser(long userId, string deletedBy);
+        bool RestoreUser(long userId);
     }
 }

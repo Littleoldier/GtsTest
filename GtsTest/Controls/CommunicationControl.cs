@@ -7,13 +7,12 @@ using System.Windows.Forms;
 
 namespace GtsTest.Controls
 {
-    // 删除 partial，完全自包含
     public class CommunicationControl : UserControl
     {
         private readonly IOpcUaClient _opcUaClient;
         private System.Windows.Forms.Timer _statusTimer;
 
-        // ---------- UI 控件（只声明一次） ----------
+        // UI 控件
         private TextBox txtServerUrl;
         private Button btnConnect, btnDisconnect;
         private Label lblStatus, lblStatusValue;
@@ -22,16 +21,17 @@ namespace GtsTest.Controls
         private TextBox txtLog;
         private GroupBox grpConnection, grpSubscription, grpData;
 
+        // ✅ 保存事件处理程序引用（用于取消订阅）
+        private EventHandler<bool> _connHandler;
+        private EventHandler<string> _dataHandler;
+        private EventHandler<string> _errorHandler;
+
         public CommunicationControl()
         {
-            // 构建 UI
             BuildUI();
-
             _opcUaClient = new OpcUaClient();
             SubscribeEvents();
             InitTimer();
-
-            // 默认填充模拟服务器地址
             txtServerUrl.Text = "opc.tcp://DESKTOP-S793UAV:53530/OPCUA/SimulationServer";
         }
 
@@ -53,7 +53,7 @@ namespace GtsTest.Controls
             mainLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 100F));
             mainLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
 
-            // ---------- 1. 连接配置 ----------
+            // 连接配置
             grpConnection = new GroupBox
             {
                 Text = "🔗 OPC UA 连接",
@@ -94,7 +94,7 @@ namespace GtsTest.Controls
 
             grpConnection.Controls.Add(connLayout);
 
-            // ---------- 2. 订阅配置 ----------
+            // 订阅配置
             grpSubscription = new GroupBox
             {
                 Text = "📡 数据订阅",
@@ -106,7 +106,7 @@ namespace GtsTest.Controls
             {
                 Dock = DockStyle.Fill,
                 ColumnCount = 3,
-                RowCount = 1,   // 改为单行
+                RowCount = 1,
                 Padding = new Padding(5)
             };
             subLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 70));
@@ -120,7 +120,6 @@ namespace GtsTest.Controls
             btnUnsubscribe = new Button { Text = "取消订阅", Size = new Size(80, 30), BackColor = Color.LightGray, Enabled = false };
             btnUnsubscribe.Click += BtnUnsubscribe_Click;
 
-            // 将两个按钮放入水平 FlowLayoutPanel，实现并排
             FlowLayoutPanel btnPanel = new FlowLayoutPanel
             {
                 FlowDirection = FlowDirection.LeftToRight,
@@ -134,10 +133,9 @@ namespace GtsTest.Controls
             subLayout.Controls.Add(txtSubscribeNode, 1, 0);
             subLayout.Controls.Add(btnPanel, 2, 0);
 
-
             grpSubscription.Controls.Add(subLayout);
 
-            // ---------- 3. 数据日志 ----------
+            // 数据日志
             grpData = new GroupBox
             {
                 Text = "📊 实时数据日志",
@@ -169,10 +167,10 @@ namespace GtsTest.Controls
             this.ResumeLayout(false);
         }
 
-        // ---------- 事件订阅 ----------
+        // ---------- 事件订阅（保存引用便于取消） ----------
         private void SubscribeEvents()
         {
-            _opcUaClient.ConnectionStateChanged += (s, connected) =>
+            _connHandler = (s, connected) =>
             {
                 this.BeginInvoke(new Action(() =>
                 {
@@ -193,17 +191,15 @@ namespace GtsTest.Controls
                 }));
             };
 
-            _opcUaClient.DataValueChanged += (s, data) =>
+            _dataHandler = (s, data) =>
             {
                 this.BeginInvoke(new Action(() =>
                 {
-                    // ✅ 添加调试日志
                     AppLogger.Info($"📢 UI 收到数据事件: {data}", "Communication");
                     var parts = data.Split('|');
                     if (parts.Length == 2)
                     {
                         txtLog.AppendText($"[{DateTime.Now:HH:mm:ss}] {parts[0]} = {parts[1]}{Environment.NewLine}");
-                        // 限制日志行数
                         if (txtLog.Lines.Length > 100)
                         {
                             var lines = txtLog.Lines;
@@ -213,13 +209,17 @@ namespace GtsTest.Controls
                 }));
             };
 
-            _opcUaClient.ErrorOccurred += (s, error) =>
+            _errorHandler = (s, error) =>
             {
                 this.BeginInvoke(new Action(() =>
                 {
                     txtLog.AppendText($"[{DateTime.Now:HH:mm:ss}] ❌ {error}{Environment.NewLine}");
                 }));
             };
+
+            _opcUaClient.ConnectionStateChanged += _connHandler;
+            _opcUaClient.DataValueChanged += _dataHandler;
+            _opcUaClient.ErrorOccurred += _errorHandler;
         }
 
         private void InitTimer()
@@ -265,8 +265,6 @@ namespace GtsTest.Controls
             _opcUaClient.Subscribe(nodeId);
             btnUnsubscribe.Enabled = true;
             txtLog.AppendText($"[{DateTime.Now:HH:mm:ss}] 订阅节点: {nodeId}{Environment.NewLine}");
-
-
         }
 
         private void BtnUnsubscribe_Click(object sender, EventArgs e)
@@ -280,18 +278,27 @@ namespace GtsTest.Controls
             }
         }
 
-        private void InitializeComponent()
-        {
+        private void InitializeComponent() { }
 
-        }
-
+        // ================================================================
+        // ✅ 修复：释放资源并取消事件订阅
+        // ================================================================
         protected override void Dispose(bool disposing)
         {
             if (disposing)
             {
+                // 停止定时器
                 _statusTimer?.Stop();
                 _statusTimer?.Dispose();
-                _opcUaClient?.Dispose();
+
+                // ✅ 取消 OPC UA 事件订阅
+                if (_opcUaClient != null)
+                {
+                    _opcUaClient.ConnectionStateChanged -= _connHandler;
+                    _opcUaClient.DataValueChanged -= _dataHandler;
+                    _opcUaClient.ErrorOccurred -= _errorHandler;
+                    _opcUaClient.Dispose();
+                }
             }
             base.Dispose(disposing);
         }

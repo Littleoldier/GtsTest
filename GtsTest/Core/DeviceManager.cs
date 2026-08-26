@@ -1,22 +1,37 @@
-﻿using GtsTest.Modbus;
+﻿using GtsTest.Commands;
+using GtsTest.Modbus;
+using GtsTest.Models;
+using GtsTest.Services.Alarm;
+using GtsTest.Services.Authentication;
+using GtsTest.Services.Data;
 using System;
-using System.Collections.Generic;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
+using System.IO;
 using System.Linq;
+using System.Text.Encodings.Web;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
-using GtsTest.Services.Alarm;
-using GtsTest.Models;
 
 namespace GtsTest.Core
 {
     /// <summary>
-    /// 设备管理器：管理多台从机的并行控制与数据采集（async/Task 版本）
+    /// 设备管理器：管理多台设备的并行控制与数据采集
+    /// 支持设备与工作流（配方）完全解耦，运行时动态指定工作流
     /// </summary>
     public class DeviceManager : IDisposable
     {
+        // 缓存 JsonSerializerOptions
+        private static readonly JsonSerializerOptions _jsonOptions = new JsonSerializerOptions
+        {
+            WriteIndented = true,
+            Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+        };
+
         private readonly ConcurrentDictionary<string, DeviceRuntime> _devices = new();
         private readonly GtsModel _model;
+        private readonly IDataRepository? _repository;
         private bool _disposed = false;
         private readonly IAlarmManager _alarmManager;
 
@@ -26,14 +41,16 @@ namespace GtsTest.Core
         public event Action<string, int, int>? OnDeviceProductionUpdated;
         public IAlarmManager AlarmManager => _alarmManager;
 
-        public DeviceManager(GtsModel model)
+        public DeviceManager(GtsModel model, IDataRepository? repository = null)
         {
-            _model = model;
+            _model = model ?? throw new ArgumentNullException(nameof(model));
+            _repository = repository;
             _alarmManager = new AlarmManager();
         }
 
         public GtsModel Model => _model;
 
+        // ---------- 添加/移除设备 ----------
         public bool AddDevice(DeviceConfig config)
         {
             var runtime = new DeviceRuntime
@@ -42,28 +59,25 @@ namespace GtsTest.Core
                 ModbusClient = new ModbusClient(config.Modbus)
             };
 
-            // 绑定事件（关闭捕获问题：使用 local runtime）
-            runtime.ModbusClient.ConnectionStateChanged += (s, e) =>
+            runtime.ConnectionStateChangedHandler = (s, e) =>
             {
                 try
                 {
                     runtime.IsOnline = e.IsConnected;
                     OnDeviceOnlineChanged?.Invoke(config.DeviceId, e.IsConnected);
                     if (!e.IsConnected)
-                    {
                         runtime.LastError = e.ErrorMessage ?? "连接断开";
-                    }
                 }
                 catch (Exception ex)
                 {
                     AppLogger.Warn($"⚠️ ConnectionStateChanged 处理异常: {ex}", "DeviceManager");
                 }
             };
+            runtime.ModbusClient.ConnectionStateChanged += runtime.ConnectionStateChangedHandler;
 
             if (!_devices.TryAdd(config.DeviceId, runtime))
             {
                 AppLogger.Warn($"⚠️ 添加设备失败（已存在）: {config.DeviceId}", "DeviceManager");
-                // 清理刚创建但未被使用的资源
                 try { runtime.ModbusClient.Dispose(); } catch { }
                 try { runtime.Watchdog.Dispose(); } catch { }
                 return false;
@@ -73,12 +87,6 @@ namespace GtsTest.Core
             return true;
         }
 
-        /// <summary>
-        /// 原子地移除设备并释放资源（异步版本）
-        /// </summary>
-        /// <param name="deviceId"></param>
-        /// <param name="stopTimeoutMs"></param>
-        /// <returns></returns>
         public async Task<bool> RemoveDeviceAsync(string deviceId, int stopTimeoutMs = 1000)
         {
             if (!_devices.TryRemove(deviceId, out var runtime) || runtime == null)
@@ -86,28 +94,26 @@ namespace GtsTest.Core
 
             try
             {
-                // 请求取消
-                try { runtime.WorkflowCts?.Cancel(); }
-                catch (Exception ex)
+                // 取消事件订阅
+                if (runtime.ConnectionStateChangedHandler != null && runtime.ModbusClient != null)
                 {
-                    AppLogger.Warn($"⚠️ 取消设备 [{deviceId}] 的 CancellationToken 时出错: {ex}", "DeviceManager");
+                    runtime.ModbusClient.ConnectionStateChanged -= runtime.ConnectionStateChangedHandler;
                 }
 
-                // 等待任务优雅结束（带超时）
+                try { runtime.WorkflowCts?.Cancel(); } catch { }
+                try { runtime.CurrentCommand?.Stop(); } catch { }
+
                 var task = runtime.WorkflowTask ?? Task.CompletedTask;
                 if (!task.IsCompleted)
                 {
                     var finished = await Task.WhenAny(task, Task.Delay(stopTimeoutMs));
                     if (finished != task)
-                    {
-                        AppLogger.Warn($"⚠️ 设备 [{deviceId}] 停止超时 (>{stopTimeoutMs}ms)，将强制清理资源", "DeviceManager");
-                    }
+                        AppLogger.Warn($"⚠️ 设备 [{deviceId}] 停止超时 (>{stopTimeoutMs}ms)", "DeviceManager");
                 }
 
-                // 断开并释放外部资源（容错）
-                try { runtime.ModbusClient.Disconnect(); } catch (Exception ex) { AppLogger.Warn($"⚠️ Disconnect 出错: {ex}", "DeviceManager"); }
-                try { runtime.ModbusClient.Dispose(); } catch (Exception ex) { AppLogger.Warn($"⚠️ Dispose ModbusClient 出错: {ex}", "DeviceManager"); }
-                try { runtime.Watchdog.Dispose(); } catch (Exception ex) { AppLogger.Warn($"⚠️ Dispose Watchdog 出错: {ex}", "DeviceManager"); }
+                try { runtime.ModbusClient.Disconnect(); } catch { }
+                try { runtime.ModbusClient.Dispose(); } catch { }
+                try { runtime.Watchdog.Dispose(); } catch { }
 
                 AppLogger.Info($"✅ 设备 [{deviceId}] 已移除", "DeviceManager");
                 return true;
@@ -119,27 +125,33 @@ namespace GtsTest.Core
             }
         }
 
-        /// <summary>
-        /// 兼容同步调用（阻塞等待）
-        /// </summary>
         public bool RemoveDevice(string deviceId, int stopTimeoutMs = 1000)
-        {
-            return RemoveDeviceAsync(deviceId, stopTimeoutMs).GetAwaiter().GetResult();
-        }
+            => RemoveDeviceAsync(deviceId, stopTimeoutMs).GetAwaiter().GetResult();
 
-        public bool StartDevice(string deviceId)
+        // ---------- 启动/停止（支持指定工作流） ----------
+        /// <summary>
+        /// 启动设备，可指定工作流名称（配方名）
+        /// </summary>
+        public bool StartDevice(string deviceId, string? workflowName = null)
         {
             if (!_devices.TryGetValue(deviceId, out var runtime) || runtime == null) return false;
 
-            // 防止重复启动：使用简单锁定检查与设置 IsRunning
             lock (runtime)
             {
                 if (runtime.IsRunning) return true;
 
-                // 先尝试连接 Modbus，连接成功才启动循环
                 if (!runtime.ModbusClient.Connect())
                 {
                     AppLogger.Error($"❌ 设备 [{runtime.Config.Name}] Modbus 连接失败，无法启动", "DeviceManager");
+                    return false;
+                }
+
+                // 设置当前工作流名称（若传入则使用传入值，否则使用已存储的）
+                if (!string.IsNullOrEmpty(workflowName))
+                    runtime.CurrentWorkflowName = workflowName;
+                else if (string.IsNullOrEmpty(runtime.CurrentWorkflowName))
+                {
+                    AppLogger.Error($"❌ 设备 [{runtime.Config.Name}] 未指定工作流，无法启动", "DeviceManager");
                     return false;
                 }
 
@@ -147,10 +159,15 @@ namespace GtsTest.Core
                 var token = runtime.WorkflowCts.Token;
                 runtime.WorkflowTask = Task.Run(() => DeviceLoopAsync(runtime, token), token);
                 runtime.IsRunning = true;
-                AppLogger.Info($"▶️ 设备 [{runtime.Config.Name}] 已启动", "DeviceManager");
+                AppLogger.Info($"▶️ 设备 [{runtime.Config.Name}] 已启动，工作流: {runtime.CurrentWorkflowName}", "DeviceManager");
                 return true;
             }
         }
+
+        /// <summary>
+        /// 使用已设置的工作流启动设备（兼容旧调用）
+        /// </summary>
+        public bool StartDevice(string deviceId) => StartDevice(deviceId, null);
 
         public bool StopDevice(string deviceId, int stopTimeoutMs = 1000)
         {
@@ -160,14 +177,8 @@ namespace GtsTest.Core
             {
                 if (!runtime.IsRunning) return true;
 
-                try
-                {
-                    runtime.WorkflowCts?.Cancel();
-                }
-                catch (Exception ex)
-                {
-                    AppLogger.Warn($"⚠️ 取消设备 [{deviceId}] 的工作流时出错: {ex}", "DeviceManager");
-                }
+                try { runtime.WorkflowCts?.Cancel(); } catch { }
+                try { runtime.CurrentCommand?.Stop(); } catch { }
 
                 var task = runtime.WorkflowTask ?? Task.CompletedTask;
                 if (!task.IsCompleted)
@@ -176,17 +187,13 @@ namespace GtsTest.Core
                     {
                         var finished = Task.WhenAny(task, Task.Delay(stopTimeoutMs)).GetAwaiter().GetResult();
                         if (finished != task)
-                        {
                             AppLogger.Warn($"⚠️ 设备 [{deviceId}] 停止超时 (>{stopTimeoutMs}ms)", "DeviceManager");
-                        }
                     }
-                    catch (Exception ex)
-                    {
-                        AppLogger.Warn($"⚠️ 等待设备 [{deviceId}] 任务结束时出错: {ex}", "DeviceManager");
-                    }
+                    catch { }
                 }
 
                 runtime.IsRunning = false;
+                runtime.CurrentCommand = null;
                 try { runtime.Watchdog.Stop(); } catch { }
                 AppLogger.Info($"⏹ 设备 [{runtime.Config.Name}] 已停止", "DeviceManager");
                 return true;
@@ -195,189 +202,177 @@ namespace GtsTest.Core
 
         public void StartAllDevices()
         {
+            int started = 0;
+            int skipped = 0;
             foreach (var kv in _devices)
             {
                 var runtime = kv.Value;
-                if (runtime.IsOnline && !runtime.IsRunning)
+                if (!runtime.IsOnline || runtime.IsRunning) continue;
+
+                string workflow = runtime.BoundWorkflowName;
+                if (string.IsNullOrEmpty(workflow))
                 {
-                    StartDevice(kv.Key);
+                    AppLogger.Warn($"设备 [{runtime.Config.Name}] 未绑定工作流，跳过启动", "DeviceManager");
+                    skipped++;
+                    continue;
                 }
-                else if (!runtime.IsOnline)
+
+                // 检查工作流文件是否存在
+                string filePath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Workflows", workflow + ".json");
+                if (!File.Exists(filePath))
                 {
-                    AppLogger.Warn($"⚠️ 设备 [{runtime.Config.Name}] 未连接，跳过启动", "DeviceManager");
+                    AppLogger.Warn($"设备 [{runtime.Config.Name}] 绑定的工作流文件不存在: {workflow}.json，跳过启动", "DeviceManager");
+                    skipped++;
+                    continue;
                 }
+
+                if (StartDevice(kv.Key, workflow))
+                    started++;
             }
+
+            if (skipped > 0)
+                AppLogger.Warn($"全部启动完成：{started} 台成功，{skipped} 台跳过（未绑定或文件缺失）", "DeviceManager");
+            else if (started > 0)
+                AppLogger.Info($"全部启动完成：{started} 台设备已启动", "DeviceManager");
+            else
+                AppLogger.Warn("没有设备可启动", "DeviceManager");
+        }
+
+        /// <summary>
+        /// 为设备绑定工作流（不启动设备）
+        /// </summary>
+        public bool SetBoundWorkflow(string deviceId, string workflowName)
+        {
+            if (!_devices.TryGetValue(deviceId, out var runtime) || runtime == null)
+                return false;
+            runtime.BoundWorkflowName = workflowName;
+            AppLogger.Info($"设备 [{runtime.Config.Name}] 已绑定工作流: {workflowName}", "DeviceManager");
+            return true;
+        }
+
+        /// <summary>
+        /// 获取设备绑定的工作流名称
+        /// </summary>
+        public string? GetBoundWorkflow(string deviceId)
+        {
+            if (!_devices.TryGetValue(deviceId, out var runtime) || runtime == null)
+                return null;
+            return runtime.BoundWorkflowName;
         }
 
         public void StopAllDevices(int stopTimeoutMs = 1000)
         {
             var keys = _devices.Keys.ToList();
-            foreach (var deviceId in keys)
-            {
-                StopDevice(deviceId, stopTimeoutMs);
-            }
+            foreach (var id in keys)
+                StopDevice(id, stopTimeoutMs);
         }
 
+        /// <summary>
+        /// 为设备设置工作流（配方），仅在设备停止时有效
+        /// </summary>
+        public bool SetDeviceWorkflow(string deviceId, string workflowName)
+        {
+            if (!_devices.TryGetValue(deviceId, out var runtime) || runtime == null) return false;
+            if (runtime.IsRunning)
+            {
+                AppLogger.Warn($"设备 [{runtime.Config.Name}] 正在运行，请先停止再切换工作流", "DeviceManager");
+                return false;
+            }
+            runtime.CurrentWorkflowName = workflowName;
+            runtime.CurrentWorkflow = null; // 清空缓存，下次启动时重新加载
+            AppLogger.Info($"设备 [{runtime.Config.Name}] 已设置工作流: {workflowName}", "DeviceManager");
+            return true;
+        }
+
+        /// <summary>
+        /// 获取设备当前工作流名称
+        /// </summary>
+        public string? GetDeviceWorkflow(string deviceId)
+        {
+            if (!_devices.TryGetValue(deviceId, out var runtime) || runtime == null)
+                return null;
+            return runtime.CurrentWorkflowName;
+        }
+
+        // ---------- 获取设备 ----------
         public DeviceRuntime? GetDevice(string deviceId)
         {
             _devices.TryGetValue(deviceId, out var runtime);
             return runtime;
         }
 
-        public List<DeviceRuntime> GetAllDevices()
-        {
-            return _devices.Values.ToList();
-        }
+        public List<DeviceRuntime> GetAllDevices() => _devices.Values.ToList();
 
-        // ================================================================
-        // 基于保持寄存器的信号读写（新增）
-        // ================================================================
+        // ---------- Modbus 信号读写 ----------
         public bool WriteRegisterSignal(string targetDeviceId, int address, ushort value)
         {
             var device = GetDevice(targetDeviceId);
-            if (device == null || !device.IsOnline)
-            {
-                AppLogger.Warn($"⚠️ 设备 [{targetDeviceId}] 不在线，写入寄存器失败", "DeviceManager");
-                return false;
-            }
-
-            try
-            {
-                return device.ModbusClient.WriteSingleRegister((ushort)address, value);
-            }
-            catch (Exception ex)
-            {
-                AppLogger.Error($"❌ 写寄存器异常: 设备={targetDeviceId}, 地址={address}, 错误={ex.Message}", "DeviceManager");
-                return false;
-            }
+            if (device == null || !device.IsOnline) return false;
+            try { return device.ModbusClient.WriteSingleRegister((ushort)address, value); }
+            catch { return false; }
         }
 
         public bool WriteRegisterSignal(string targetDeviceId, int address, ushort[] values)
         {
             var device = GetDevice(targetDeviceId);
-            if (device == null || !device.IsOnline)
-            {
-                AppLogger.Warn($"⚠️ 设备 [{targetDeviceId}] 不在线，写入寄存器失败", "DeviceManager");
-                return false;
-            }
-
-            try
-            {
-                return device.ModbusClient.WriteMultipleRegisters((ushort)address, values);
-            }
-            catch (Exception ex)
-            {
-                AppLogger.Error($"❌ 写寄存器异常: 设备={targetDeviceId}, 地址={address}, 错误={ex.Message}", "DeviceManager");
-                return false;
-            }
+            if (device == null || !device.IsOnline) return false;
+            try { return device.ModbusClient.WriteMultipleRegisters((ushort)address, values); }
+            catch { return false; }
         }
 
         public ushort[]? ReadRegisterSignal(string targetDeviceId, int address, int count = 1)
         {
             var device = GetDevice(targetDeviceId);
-            if (device == null || !device.IsOnline)
-            {
-                AppLogger.Warn($"⚠️ 设备 [{targetDeviceId}] 不在线，读取寄存器失败", "DeviceManager");
-                return null;
-            }
-
-            try
-            {
-                var result = device.ModbusClient.ReadHoldingRegistersWithRaw((ushort)address, (ushort)count);
-                return result?.RawRegisters;
-            }
-            catch (Exception ex)
-            {
-                AppLogger.Error($"❌ 读寄存器异常: 设备={targetDeviceId}, 地址={address}, 错误={ex.Message}", "DeviceManager");
-                return null;
-            }
-        }
-
-        public T? ReadRegisterSignal<T>(string targetDeviceId, int address, DataType dataType, ByteOrder byteOrder = ByteOrder.BigEndian)
-        {
-            int registerCount = GetRegisterCountForType(dataType);
-            var raw = ReadRegisterSignal(targetDeviceId, address, registerCount);
-            if (raw == null || raw.Length < registerCount) return default;
-
-            try
-            {
-                var encoded = ModbusClient.EncodeValue(raw, dataType, byteOrder);
-                if (encoded == null) return default;
-
-                if (encoded is Array arr && arr.Length > 0)
-                    return (T)Convert.ChangeType(arr.GetValue(0), typeof(T));
-
-                return (T)Convert.ChangeType(encoded, typeof(T));
-            }
-            catch (Exception ex)
-            {
-                AppLogger.Error($"❌ 转换寄存器数据失败: {ex.Message}", "DeviceManager");
-                return default;
-            }
-        }
-
-        private int GetRegisterCountForType(DataType type)
-        {
-            return type switch
-            {
-                DataType.Int16 or DataType.UInt16 => 1,
-                DataType.Int32 or DataType.UInt32 or DataType.Float => 2,
-                DataType.Double => 4,
-                _ => 1
-            };
+            if (device == null || !device.IsOnline) return null;
+            try { return device.ModbusClient.ReadHoldingRegistersWithRaw((ushort)address, (ushort)count)?.RawRegisters; }
+            catch { return null; }
         }
 
         public bool WriteSignal(string targetDeviceId, int address, bool value)
         {
             var device = GetDevice(targetDeviceId);
             if (device == null || !device.IsOnline) return false;
-            return device.ModbusClient.WriteSingleCoil((ushort)address, value);
+            try { return device.ModbusClient.WriteSingleCoil((ushort)address, value); }
+            catch { return false; }
         }
 
         public bool? ReadSignal(string targetDeviceId, int address)
         {
             var device = GetDevice(targetDeviceId);
             if (device == null || !device.IsOnline) return null;
-            var result = device.ModbusClient.ReadDataByType((ushort)address, 1);
-            if (result == null || result.RawRegisters.Length == 0) return null;
-            return (result.RawRegisters[0] & 0x0001) != 0;
+            try
+            {
+                var result = device.ModbusClient.ReadDataByType((ushort)address, 1);
+                if (result == null || result.RawRegisters.Length == 0) return null;
+                return (result.RawRegisters[0] & 0x0001) != 0;
+            }
+            catch { return null; }
         }
 
+        // ---------- 配置导出/导入 ----------
         public string ExportConfig()
         {
             var list = _devices.Values.Select(r => r.Config).ToList();
-            var options = new System.Text.Json.JsonSerializerOptions
-            {
-                WriteIndented = true,
-                Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping
-            };
-            return System.Text.Json.JsonSerializer.Serialize(list, options);
+            return JsonSerializer.Serialize(list, _jsonOptions);
         }
 
         public bool ImportConfig(string json)
         {
             try
             {
-                var configs = System.Text.Json.JsonSerializer.Deserialize<List<DeviceConfig>>(json);
+                var configs = JsonSerializer.Deserialize<List<DeviceConfig>>(json);
                 if (configs == null) return false;
 
                 StopAllDevices();
-                // 清理并释放现有 runtime
                 foreach (var kv in _devices.ToList())
                 {
-                    try
-                    {
-                        kv.Value.ModbusClient?.Disconnect();
-                        kv.Value.Watchdog?.Dispose();
-                    }
-                    catch { }
+                    try { kv.Value.ModbusClient?.Disconnect(); } catch { }
+                    try { kv.Value.Watchdog?.Dispose(); } catch { }
                     _devices.TryRemove(kv.Key, out _);
                 }
 
                 foreach (var config in configs)
-                {
                     AddDevice(config);
-                }
                 return true;
             }
             catch (Exception ex)
@@ -387,515 +382,341 @@ namespace GtsTest.Core
             }
         }
 
-        public void Dispose()
+        // ---------- 复位功能 ----------
+        public enum ResetMode
         {
-            if (_disposed) return;
-            _disposed = true;
-
-            StopAllDevices();
-            foreach (var runtime in _devices.Values)
-            {
-                try { runtime.ModbusClient?.Dispose(); } catch { }
-                try { runtime.Watchdog?.Dispose(); } catch { }
-            }
-            _devices.Clear();
-            AppLogger.Info("🗑️ DeviceManager 已释放", "DeviceManager");
+            HardReset,
+            SoftReset,
+            FullReset
         }
 
-        // ========== 核心循环（异步） ==========
+        public async Task<bool> ResetWorkflowAsync(string deviceId, ResetMode mode = ResetMode.SoftReset, string triggeredBy = "系统")
+        {
+            if (!_devices.TryGetValue(deviceId, out var runtime))
+            {
+                AppLogger.Warn($"复位失败：设备 [{deviceId}] 不存在", "DeviceManager");
+                return false;
+            }
+
+            lock (runtime)
+            {
+                if (runtime.IsRunning)
+                {
+                    try { runtime.WorkflowCts?.Cancel(); } catch { }
+                    try { runtime.CurrentCommand?.Stop(); } catch { }
+
+                    if (runtime.WorkflowTask != null && !runtime.WorkflowTask.IsCompleted)
+                    {
+                        try
+                        {
+                            var finished = Task.WhenAny(runtime.WorkflowTask, Task.Delay(2000)).GetAwaiter().GetResult();
+                            if (finished != runtime.WorkflowTask)
+                                AppLogger.Warn($"设备 [{runtime.Config.Name}] 复位超时 (2s)，强制重置状态", "DeviceManager");
+                        }
+                        catch { }
+                    }
+                    runtime.IsRunning = false;
+                }
+
+                switch (mode)
+                {
+                    case ResetMode.HardReset:
+                        runtime.Config.CurrentCount = 0;
+                        runtime.CurrentStepIndex = 0;
+                        runtime.IsPaused = false;
+                        runtime.WorkflowContext.Clear();
+                        AppLogger.Info($"设备 [{runtime.Config.Name}] 硬重置：产量归零，从头开始", "DeviceManager");
+                        break;
+                    case ResetMode.SoftReset:
+                        runtime.IsPaused = false;
+                        runtime.LastError = "";
+                        AppLogger.Info($"设备 [{runtime.Config.Name}] 软重置：从步骤 {runtime.CurrentStepIndex + 1} 继续", "DeviceManager");
+                        break;
+                    case ResetMode.FullReset:
+                        runtime.Config.CurrentCount = 0;
+                        runtime.CurrentStepIndex = 0;
+                        runtime.IsPaused = false;
+                        runtime.CurrentWorkflow = null;
+                        runtime.WorkflowContext.Clear();
+                        AppLogger.Info($"设备 [{runtime.Config.Name}] 完全重置：产量归零，重新加载工作流", "DeviceManager");
+                        break;
+                }
+
+                runtime.LastError = "";
+                runtime.Watchdog.Feed();
+
+                var user = SessionManager.CurrentUser;
+                AuditService.Log(
+                    userId: user?.Id ?? 0,
+                    username: user?.Username ?? triggeredBy,
+                    actionType: "WorkflowReset",
+                    detail: $"设备 [{runtime.Config.Name}] {mode} 触发，当前产量 {runtime.Config.CurrentCount}，步骤索引 {runtime.CurrentStepIndex}",
+                    repo: _repository
+                );
+
+                OnDeviceStepChanged?.Invoke(deviceId, "空闲");
+                return true;
+            }
+        }
+
+        // ================================================================
+        // 🔄 核心循环（从配方库加载工作流）
+        // ================================================================
         private async Task DeviceLoopAsync(DeviceRuntime runtime, CancellationToken ct)
         {
             var config = runtime.Config;
             var modbus = runtime.ModbusClient;
             var watchdog = runtime.Watchdog;
 
-            if (!modbus.IsConnected)
+            // 从配方库加载工作流
+            if (runtime.CurrentWorkflow == null && !string.IsNullOrEmpty(runtime.CurrentWorkflowName))
+                runtime.CurrentWorkflow = LoadWorkflowFromFile(runtime.CurrentWorkflowName);
+
+            var workflow = runtime.CurrentWorkflow;
+
+            // 无工作流 -> 空闲保活
+            if (workflow == null || workflow.Commands.Count == 0)
             {
-                AppLogger.Error($"❌ 设备 [{config.Name}] Modbus 未连接，循环退出", "DeviceManager");
+                AppLogger.Warn($"设备 [{config.Name}] 未配置有效工作流，进入空闲保活模式", "DeviceManager");
+                while (!ct.IsCancellationRequested && runtime.IsRunning)
+                {
+                    try
+                    {
+                        if (!modbus.IsConnected)
+                        {
+                            if (modbus.Reconnect(config.Modbus))
+                                AppLogger.Info($"设备 [{config.Name}] 空闲重连成功", "DeviceManager");
+                            else
+                                await Task.Delay(2000, ct);
+                        }
+                        else
+                        {
+                            watchdog.Feed();
+                            await Task.Delay(1000, ct);
+                        }
+                    }
+                    catch (OperationCanceledException) { break; }
+                    catch (Exception ex)
+                    {
+                        AppLogger.Error($"设备 [{config.Name}] 空闲保活异常: {ex.Message}", "DeviceManager");
+                        await Task.Delay(2000, ct);
+                    }
+                }
                 runtime.IsRunning = false;
                 return;
             }
 
-            // 看门狗设置
-            watchdog.OnTimeout = () =>
+            // 连接检查
+            if (!modbus.IsConnected && !modbus.Reconnect(config.Modbus))
             {
-                AppLogger.Warn($"⚠️ 设备 [{config.Name}] 🐕看门狗超时！", "DeviceManager");
-            };
-
-            try
-            {
-                watchdog.Start();
-                AppLogger.Info($"✅ 设备 [{config.Name}] 🐕看门狗已启动 (超时: {watchdog.RemainingMs}ms)", "DeviceManager");
-            }
-            catch (Exception ex)
-            {
-                AppLogger.Warn($"⚠️ 启动看门狗失败: {ex}", "DeviceManager");
+                AppLogger.Error($"设备 [{config.Name}] Modbus 初始连接失败，循环退出", "DeviceManager");
+                runtime.IsRunning = false;
+                return;
             }
 
-            int consecutiveFailures = 0;
-            const int maxFailures = 3;
+            watchdog.Start();
+            AppLogger.Info($"✅ 设备 [{config.Name}] 开始执行工作流: {workflow.Name}，目标产量 {config.TargetCount}", "DeviceManager");
 
-            // 工作流状态变量（本地）
-            int currentStep = 0;
-            bool workCompleted = false;
-            bool signalSent = false;
-
-            while (!ct.IsCancellationRequested)
+            // 主循环
+            while (!ct.IsCancellationRequested && config.CurrentCount < config.TargetCount)
             {
                 try
                 {
-                    // ---- 1. 看门狗检查 ----
+                    // 硬件急停检测
+                    if (_model.IsEmergencyStopPressed())
+                    {
+                        AppLogger.Warn($"⚠️ 检测到硬件急停信号！设备 [{config.Name}] 强制暂停", "DeviceManager");
+                        runtime.WorkflowCts?.Cancel();
+                        runtime.IsPaused = true;
+                        while (_model.IsEmergencyStopPressed() && !ct.IsCancellationRequested)
+                        {
+                            await Task.Delay(200, ct);
+                        }
+                        AppLogger.Info($"设备 [{config.Name}] 急停已复位，等待操作员恢复生产", "DeviceManager");
+                        continue;
+                    }
+
+                    // 看门狗和连接检查
                     if (watchdog.IsTimeout)
                     {
-                        AppLogger.Warn($"⚠️ 设备 [{config.Name}] 🐕看门狗已触发，尝试恢复...", "DeviceManager");
+                        AppLogger.Warn($"设备 [{config.Name}] 看门狗超时，尝试恢复", "DeviceManager");
                         if (!modbus.IsConnected)
                         {
                             if (modbus.Reconnect(config.Modbus))
                             {
-                                AppLogger.Info($"✅ 设备 [{config.Name}] 重连成功，重置🐕看门狗", "DeviceManager");
                                 watchdog.Feed();
+                                AppLogger.Info($"设备 [{config.Name}] 重连成功，看门狗重置", "DeviceManager");
                             }
                             else
                             {
-                                AppLogger.Error($"❌ 设备 [{config.Name}] 重连失败，停止循环", "DeviceManager");
+                                AppLogger.Error($"设备 [{config.Name}] 重连失败，循环退出", "DeviceManager");
                                 break;
                             }
                         }
                         else
                         {
-                            AppLogger.Warn($"⚠️ 设备 [{config.Name}] 连接正常但🐕看门狗超时，重置🐕看门狗", "DeviceManager");
                             watchdog.Feed();
+                            AppLogger.Warn($"设备 [{config.Name}] 看门狗已重置（连接正常）", "DeviceManager");
                         }
-                        await Task.Delay(1, ct).ConfigureAwait(false);
-                        continue;
                     }
 
-                    // ---- 2. 连接状态检查 ----
                     if (!modbus.IsConnected)
                     {
-                        AppLogger.Warn($"⚠️ 设备 [{config.Name}] Modbus 连接断开，尝试重连...", "DeviceManager");
-                        if (!modbus.Reconnect(config.Modbus))
+                        AppLogger.Warn($"设备 [{config.Name}] Modbus 连接断开，尝试重连", "DeviceManager");
+                        if (modbus.Reconnect(config.Modbus))
                         {
-                            AppLogger.Error($"❌ 设备 [{config.Name}] 重连失败，循环退出", "DeviceManager");
-                            break;
+                            watchdog.Feed();
+                            AppLogger.Info($"设备 [{config.Name}] 重连成功", "DeviceManager");
                         }
-                        AppLogger.Info($"✅ 设备 [{config.Name}] 重连成功", "DeviceManager");
-                        watchdog.Feed();
-                        await Task.Delay(1, ct).ConfigureAwait(false);
+                        else
+                        {
+                            await Task.Delay(2000, ct);
+                            continue;
+                        }
+                    }
+
+                    // 工作流执行（断点恢复）
+                    int startIndex = runtime.CurrentStepIndex;
+                    if (runtime.IsPaused)
+                    {
+                        AppLogger.Info($"设备 [{config.Name}] 处于暂停状态，等待恢复 (步骤 {startIndex + 1})", "DeviceManager");
+                        await Task.Delay(500, ct);
+                        continue;
+                    }
+                    else if (startIndex >= workflow.Commands.Count)
+                    {
+                        startIndex = 0;
+                        runtime.CurrentStepIndex = 0;
+                    }
+
+                    var remainingCommands = workflow.Commands
+                        .Skip(startIndex)
+                        .Select(cfg => CommandFactory.Create(_model, this, cfg))
+                        .ToList();
+
+                    if (remainingCommands.Count == 0)
+                    {
+                        await Task.Delay(500, ct);
+                        runtime.CurrentStepIndex = 0;
                         continue;
                     }
 
-                    // ---- 3. 读取 Modbus 数据（被注释的原逻辑保留，如需启用可改为异步） ----
-                    //var result = modbus.ReadDataByType(config.Modbus.StartAddress, config.Modbus.RegisterCount);
-                    //if (result != null) { ... }
+                    var sequence = new SequenceCommand(remainingCommands.ToArray());
+                    runtime.CurrentCommand = sequence;
 
-                    // ---- 4. 执行工作流 ----
-                    // 注意：之前使用 deviceId 的硬编码分支。保持原有行为以兼容现有 workflow test cases。
-                    switch (config.DeviceId)
+                    int currentStepIdx = startIndex;
+                    sequence.OnLog += msg =>
                     {
-                        case "dev-001":
-                            await ExecuteWorkflowDevice1Async(runtime, currentStepRef: s => currentStep = s, completedRef: b => workCompleted = b, sentRef: b => signalSent = b, ct);
-                            break;
-                        case "dev-002":
-                            await ExecuteWorkflowDevice2Async(runtime, currentStepRef: s => currentStep = s, completedRef: b => workCompleted = b, sentRef: b => signalSent = b, ct);
-                            break;
-                        case "dev-003":
-                            await ExecuteWorkflowDevice3Async(runtime, currentStepRef: s => currentStep = s, completedRef: b => workCompleted = b, sentRef: b => signalSent = b, ct);
-                            break;
-                        default:
-                            // 其他设备保持简单循环，只更新产量
-                            if (currentStep % 10 == 0 && config.CurrentCount < config.TargetCount)
-                            {
-                                config.CurrentCount++;
-                                OnDeviceProductionUpdated?.Invoke(config.DeviceId, config.CurrentCount, config.TargetCount);
-                            }
-                            break;
-                    }
-
-                    // ---- 5. 更新UI步骤 ----
-                    string stepName = currentStep switch
-                    {
-                        0 => "空闲",
-                        1 => "回零中",
-                        2 => "定位中",
-                        3 => "加工/检测中",
-                        4 => "等待信号",
-                        _ => $"步骤{currentStep}"
+                        if (currentStepIdx < remainingCommands.Count)
+                        {
+                            var cmd = remainingCommands[currentStepIdx];
+                            runtime.CurrentStep = cmd.Name;
+                            OnDeviceStepChanged?.Invoke(config.DeviceId, cmd.Name);
+                        }
+                        AppLogger.Info(msg, "Workflow");
                     };
-                    if (runtime.CurrentStep != stepName)
+
+                    AppLogger.Info($"设备 [{config.Name}] 开始执行工作流周期 (产量 {config.CurrentCount}/{config.TargetCount})", "DeviceManager");
+                    sequence.Execute(ct);
+
+                    // 执行结果处理
+                    if (sequence.IsFaulted)
                     {
-                        runtime.CurrentStep = stepName;
-                        OnDeviceStepChanged?.Invoke(config.DeviceId, stepName);
+                        runtime.CurrentStepIndex = startIndex;
+                        runtime.IsPaused = true;
+                        runtime.LastError = sequence.FaultReason;
+                        AppLogger.Error($"设备 [{config.Name}] 工作流执行失败，已暂停于步骤 {startIndex + 1}: {sequence.FaultReason}", "DeviceManager");
+                        _alarmManager.TriggerAlarm(config.DeviceId, $"工作流暂停: {sequence.FaultReason}", AlarmSeverity.Error);
+                        await Task.Delay(2000, ct);
+                        continue;
                     }
 
-                    // 循环周期（可取消）
-                    await Task.Delay(100, ct).ConfigureAwait(false);
+                    // 成功：重置索引，产量+1
+                    startIndex = 0;
+                    runtime.CurrentStepIndex = 0;
+                    runtime.IsPaused = false;
+
+                    if (config.CurrentCount < config.TargetCount)
+                    {
+                        config.CurrentCount++;
+                        OnDeviceProductionUpdated?.Invoke(config.DeviceId, config.CurrentCount, config.TargetCount);
+                        ProductionService.RecordProduction(config.DeviceId, config.CurrentCount, config.TargetCount);
+                        AppLogger.Info($"📈 设备 [{config.Name}] 产量 +1，当前 {config.CurrentCount}/{config.TargetCount}", "DeviceManager");
+                    }
+
+                    watchdog.Feed();
+                    await Task.Delay(100, ct);
                 }
                 catch (OperationCanceledException)
                 {
-                    AppLogger.Info($"⏹ 设备 [{config.Name}] 循环被取消", "DeviceManager");
+                    AppLogger.Info($"设备 [{config.Name}] 循环被取消", "DeviceManager");
                     break;
                 }
                 catch (Exception ex)
                 {
                     runtime.LastError = ex.Message;
-                    AppLogger.Error($"❌ 设备 [{config.Name}] 循环异常: {ex.Message}", "DeviceManager");
-                    consecutiveFailures++;
-                    if (consecutiveFailures >= maxFailures)
-                    {
-                        AppLogger.Error($"❌ 设备 [{config.Name}] 连续异常 {maxFailures} 次，循环退出", "DeviceManager");
-                        break;
-                    }
-                    try { await Task.Delay(1000, ct).ConfigureAwait(false); } catch { break; }
+                    AppLogger.Error($"设备 [{config.Name}] 循环异常: {ex.Message}", "DeviceManager");
+                    runtime.IsPaused = true;
+                    _alarmManager.TriggerAlarm(config.DeviceId, $"循环异常: {ex.Message}", AlarmSeverity.Error);
+                    await Task.Delay(2000, ct);
+                }
+                finally
+                {
+                    runtime.CurrentCommand = null;
                 }
             }
 
-            // ---- 清理资源 ----
-            try { watchdog.Stop(); } catch { }
+            watchdog.Stop();
             runtime.IsRunning = false;
-            runtime.IsOnline = false;
-            try { modbus.Disconnect(); } catch { }
-            OnDeviceOnlineChanged?.Invoke(config.DeviceId, false);
-            AppLogger.Info($"⏹ 设备 [{config.Name}] 循环已退出", "DeviceManager");
+            runtime.CurrentCommand = null;
+            AppLogger.Info($"⏹ 设备 [{config.Name}] 工作流循环已退出 (产量 {config.CurrentCount}/{config.TargetCount})", "DeviceManager");
         }
 
-        // ================================================================
-        // 各设备的工作流执行函数（异步辅助方法）
-        // ================================================================
-        private async Task ExecuteWorkflowDevice1Async(DeviceRuntime runtime, Action<int> currentStepRef, Action<bool> completedRef, Action<bool> sentRef, CancellationToken ct)
+        // ---------- 辅助方法 ----------
+        private WorkflowConfig LoadWorkflowFromFile(string workflowName)
         {
-            var config = runtime.Config;
-
-            int step = 0;
-            bool completed = false;
-            bool sent = false;
-
-            // read back state from references if previously set
-            // (simple local state; the original used ref ints -- keep local then write back)
-            // For simplicity in this async refactor, we will keep and update local values and then write them back via references.
-            // Note: if you need persistent per-runtime step memory, consider storing step/state inside DeviceRuntime.
-
-            if (completed)
+            if (string.IsNullOrEmpty(workflowName)) workflowName = "Default";
+            string path = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Workflows", workflowName + ".json");
+            if (!File.Exists(path))
             {
-                completed = false;
-                sent = false;
-                step = 0;
-                AppLogger.Debug($"🔄 设备1 新一轮开始", "DeviceManager");
+                AppLogger.Warn($"工作流文件不存在: {path}，返回空流程", "DeviceManager");
+                return new WorkflowConfig { Name = "Empty", Commands = new List<CommandConfig>() };
             }
-
-            switch (step)
-            {
-                case 0:
-                    if (config.CurrentCount >= config.TargetCount)
-                    {
-                        AppLogger.Info($"✅ 设备1 目标产量达成，停止工作", "DeviceManager");
-                        break;
-                    }
-                    bool? confirm = ReadSignal("dev-001", 300);
-                    if (confirm != true)
-                    {
-                        if (!sent && !completed)
-                        {
-                            step = 1;
-                            AppLogger.Info($"🔧 设备1 首次启动 (当前产量 {config.CurrentCount}/{config.TargetCount})", "DeviceManager");
-                        }
-                        else
-                        {
-                            AppLogger.Debug("⏳ 设备1 等待设备2确认信号...", "DeviceManager");
-                            break;
-                        }
-                    }
-                    WriteSignal("dev-001", 300, false);
-                    step = 1;
-                    AppLogger.Info($"🔧 设备1 开始工作 (当前产量 {config.CurrentCount}/{config.TargetCount})", "DeviceManager");
-                    break;
-
-                case 1:
-                    AppLogger.Info($"↩️ 设备1 回零 (轴{config.Axis})", "DeviceManager");
-                    if (await ExecuteHomeAsync(config.Axis, config.HomePosition, 5000, ct))
-                    {
-                        step = 2;
-                        AppLogger.Info($"✅ 设备1 回零完成", "DeviceManager");
-                    }
-                    else
-                    {
-                        AppLogger.Error($"❌ 设备1 回零失败，重置步骤", "DeviceManager");
-                        step = 0;
-                    }
-                    break;
-
-                case 2:
-                    int targetPos = config.WorkPosition;
-                    AppLogger.Info($"🎯 设备1 定位到 {targetPos} (轴{config.Axis})", "DeviceManager");
-                    if (await ExecuteMoveAbsAsync(config.Axis, targetPos, config.MoveSpeed, config.MoveAcc, 5000, ct))
-                    {
-                        step = 3;
-                        AppLogger.Info($"✅ 设备1 定位完成", "DeviceManager");
-                    }
-                    else
-                    {
-                        AppLogger.Error($"❌ 设备1 定位失败，重置步骤", "DeviceManager");
-                        step = 0;
-                    }
-                    break;
-
-                case 3:
-                    AppLogger.Info($"🔥 设备1 焊接中... (延时 {config.CycleDelayMs}ms)", "DeviceManager");
-                    try { await Task.Delay(config.CycleDelayMs, ct); } catch (OperationCanceledException) { return; }
-                    if (config.CurrentCount < config.TargetCount)
-                    {
-                        config.CurrentCount++;
-                        OnDeviceProductionUpdated?.Invoke(config.DeviceId, config.CurrentCount, config.TargetCount);
-                        AppLogger.Info($"📈 设备1 产量 +1，当前 {config.CurrentCount}/{config.TargetCount}", "DeviceManager");
-                    }
-                    step = 4;
-                    break;
-
-                case 4:
-                    if (!sent)
-                    {
-                        if (WriteSignal("dev-002", 100, true))
-                        {
-                            AppLogger.Info("📡 设备1 → 设备2: 信号触发 (线圈100=ON)", "DeviceManager");
-                            sent = true;
-                            step = 5;
-                        }
-                        else
-                        {
-                            AppLogger.Warn("⚠️ 设备1 发送信号失败，重试", "DeviceManager");
-                        }
-                    }
-                    break;
-
-                case 5:
-                    bool? ack = ReadSignal("dev-001", 300);
-                    if (ack == true)
-                    {
-                        completed = true;
-                        AppLogger.Info("✅ 设备1 工作循环完成（已收到确认）", "DeviceManager");
-                    }
-                    else
-                    {
-                        AppLogger.Debug("⏳ 设备1 等待确认信号...", "DeviceManager");
-                    }
-                    break;
-            }
-
-            // write back state
-            currentStepRef(step);
-            completedRef(completed);
-            sentRef(sent);
-        }
-
-        private async Task ExecuteWorkflowDevice2Async(DeviceRuntime runtime, Action<int> currentStepRef, Action<bool> completedRef, Action<bool> sentRef, CancellationToken ct)
-        {
-            var config = runtime.Config;
-
-            int step = 0;
-            bool completed = false;
-            bool sent = false;
-
-            if (completed)
-            {
-                completed = false;
-                sent = false;
-                step = 0;
-                AppLogger.Debug($"🔄 设备2 新一轮开始", "DeviceManager");
-            }
-
-            switch (step)
-            {
-                case 0:
-                    bool? signal = ReadSignal("dev-002", 100);
-                    if (signal == true)
-                    {
-                        AppLogger.Info("📨 设备2 收到信号，开始检测", "DeviceManager");
-                        WriteSignal("dev-002", 100, false);
-                        step = 1;
-                    }
-                    else
-                    {
-                        AppLogger.Debug("⏳ 设备2 等待信号...", "DeviceManager");
-                    }
-                    break;
-
-                case 1:
-                    AppLogger.Info($"↩️ 设备2 回零 (轴{config.Axis})", "DeviceManager");
-                    if (await ExecuteHomeAsync(config.Axis, config.HomePosition, 5000, ct))
-                    {
-                        step = 2;
-                        AppLogger.Info($"✅ 设备2 回零完成", "DeviceManager");
-                    }
-                    else
-                    {
-                        AppLogger.Error($"❌ 设备2 回零失败，重置步骤", "DeviceManager");
-                        step = 0;
-                    }
-                    break;
-
-                case 2:
-                    int targetPos = config.WorkPosition;
-                    AppLogger.Info($"🎯 设备2 定位到 {targetPos} (轴{config.Axis})", "DeviceManager");
-                    if (await ExecuteMoveAbsAsync(config.Axis, targetPos, config.MoveSpeed, config.MoveAcc, 5000, ct))
-                    {
-                        step = 3;
-                        AppLogger.Info($"✅ 设备2 定位完成", "DeviceManager");
-                    }
-                    else
-                    {
-                        AppLogger.Error($"❌ 设备2 定位失败，重置步骤", "DeviceManager");
-                        step = 0;
-                    }
-                    break;
-
-                case 3:
-                    AppLogger.Info($"🔍 设备2 检测中... (延时 {config.CycleDelayMs}ms)", "DeviceManager");
-                    try { await Task.Delay(config.CycleDelayMs, ct); } catch (OperationCanceledException) { return; }
-                    AppLogger.Info($"✅ 设备2 检测通过", "DeviceManager");
-                    step = 4;
-                    break;
-
-                case 4:
-                    if (!sent)
-                    {
-                        bool success3 = WriteSignal("dev-003", 200, true);
-                        bool success1 = WriteSignal("dev-001", 300, true);
-                        if (success3 && success1)
-                        {
-                            AppLogger.Info("📡 设备2 → 设备3: 信号触发 (线圈200=ON)", "DeviceManager");
-                            AppLogger.Info("📡 设备2 → 设备1: 确认信号 (线圈300=ON)", "DeviceManager");
-                            sent = true;
-                        }
-                        else
-                        {
-                            AppLogger.Warn("⚠️ 设备2 发送信号失败，重试", "DeviceManager");
-                        }
-                    }
-                    else
-                    {
-                        completed = true;
-                        AppLogger.Info("✅ 设备2 工作循环完成", "DeviceManager");
-                    }
-                    break;
-            }
-
-            currentStepRef(step);
-            completedRef(completed);
-            sentRef(sent);
-        }
-
-        private async Task ExecuteWorkflowDevice3Async(DeviceRuntime runtime, Action<int> currentStepRef, Action<bool> completedRef, Action<bool> sentRef, CancellationToken ct)
-        {
-            var config = runtime.Config;
-
-            int step = 0;
-            bool completed = false;
-            bool sent = false;
-
-            if (completed)
-            {
-                completed = false;
-                sent = false;
-                step = 0;
-                AppLogger.Debug($"🔄 设备3 新一轮开始", "DeviceManager");
-            }
-
-            switch (step)
-            {
-                case 0:
-                    bool? signal = ReadSignal("dev-003", 200);
-                    if (signal == true)
-                    {
-                        AppLogger.Info("📨 设备3 收到信号，开始包装", "DeviceManager");
-                        WriteSignal("dev-003", 200, false);
-                        step = 1;
-                    }
-                    else
-                    {
-                        AppLogger.Debug("⏳ 设备3 等待信号...", "DeviceManager");
-                    }
-                    break;
-
-                case 1:
-                    AppLogger.Info($"📦 设备3 包装中... (延时 {config.CycleDelayMs}ms)", "DeviceManager");
-                    try { await Task.Delay(config.CycleDelayMs, ct); } catch (OperationCanceledException) { return; }
-                    AppLogger.Info($"✅ 设备3 包装完成", "DeviceManager");
-                    if (config.CurrentCount < config.TargetCount)
-                    {
-                        config.CurrentCount++;
-                        OnDeviceProductionUpdated?.Invoke(config.DeviceId, config.CurrentCount, config.TargetCount);
-                        AppLogger.Info($"📈 设备3 产量 +1，当前 {config.CurrentCount}/{config.TargetCount}", "DeviceManager");
-                    }
-                    completed = true;
-                    break;
-            }
-
-            currentStepRef(step);
-            completedRef(completed);
-            sentRef(sent);
-        }
-
-        // ================================================================
-        // 运动控制辅助方法（异步包装，支持超时和取消）
-        // ================================================================
-        private async Task<bool> ExecuteHomeAsync(short axis, int homePos, int timeoutMs, CancellationToken ct)
-        {
             try
             {
-                short result = await Task.Run(() => _model.HomeAxis(axis, homePos), ct).ConfigureAwait(false);
-                if (result != 0)
+                string json = File.ReadAllText(path);
+                var config = JsonSerializer.Deserialize<WorkflowConfig>(json);
+                if (config == null)
                 {
-                    AppLogger.Error($"回零启动失败，错误码: {result}", "DeviceManager");
-                    return false;
+                    AppLogger.Warn($"工作流文件 {path} 解析失败", "DeviceManager");
+                    return new WorkflowConfig { Name = "Invalid", Commands = new List<CommandConfig>() };
                 }
-
-                var sw = System.Diagnostics.Stopwatch.StartNew();
-                while (sw.ElapsedMilliseconds < timeoutMs)
-                {
-                    if (ct.IsCancellationRequested) return false;
-                    if (_model.CheckHomeDone(axis)) return true;
-                    await Task.Delay(20, ct).ConfigureAwait(false);
-                }
-                return false;
+                return config;
             }
-            catch (OperationCanceledException) { return false; }
             catch (Exception ex)
             {
-                AppLogger.Error($"回零过程中异常: {ex}", "DeviceManager");
-                return false;
+                AppLogger.Error($"加载工作流失败: {ex.Message}", "DeviceManager");
+                return new WorkflowConfig { Name = "Error", Commands = new List<CommandConfig>() };
             }
         }
 
-        private async Task<bool> ExecuteMoveAbsAsync(short axis, int targetPos, double vel, double acc, int timeoutMs, CancellationToken ct)
+        // ---------- 资源释放 ----------
+        public void Dispose()
         {
-            try
+            if (_disposed) return;
+            _disposed = true;
+            StopAllDevices();
+            foreach (var runtime in _devices.Values)
             {
-                short result = await Task.Run(() => _model.MoveAbs(axis, targetPos, vel, acc), ct).ConfigureAwait(false);
-                if (result != 0)
+                if (runtime.ConnectionStateChangedHandler != null && runtime.ModbusClient != null)
                 {
-                    AppLogger.Error($"定位启动失败，错误码: {result}", "DeviceManager");
-                    return false;
+                    runtime.ModbusClient.ConnectionStateChanged -= runtime.ConnectionStateChangedHandler;
                 }
-
-                var sw = System.Diagnostics.Stopwatch.StartNew();
-                while (sw.ElapsedMilliseconds < timeoutMs)
-                {
-                    if (ct.IsCancellationRequested) return false;
-                    uint clk;
-                    double pos;
-                    _model.GetPrfPos(axis, out pos, out clk);
-                    if (Math.Abs(pos - targetPos) < 5) return true;
-                    await Task.Delay(20, ct).ConfigureAwait(false);
-                }
-                return false;
+                try { runtime.ModbusClient?.Dispose(); } catch { }
+                try { runtime.Watchdog?.Dispose(); } catch { }
             }
-            catch (OperationCanceledException) { return false; }
-            catch (Exception ex)
-            {
-                AppLogger.Error($"定位过程中异常: {ex}", "DeviceManager");
-                return false;
-            }
+            _devices.Clear();
+            AppLogger.Info("🗑️ DeviceManager 已释放", "DeviceManager");
         }
-
     }
 }

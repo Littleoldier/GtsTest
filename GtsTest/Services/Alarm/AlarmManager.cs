@@ -1,9 +1,10 @@
-﻿using System;
+﻿using GtsTest.Core;
+using GtsTest.Services.Data;
+using Microsoft.Data.Sqlite;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using GtsTest.Services.Data;
-using Microsoft.Data.Sqlite;
 
 namespace GtsTest.Services.Alarm
 {
@@ -111,6 +112,9 @@ namespace GtsTest.Services.Alarm
             }
 
             AlarmAdded?.Invoke(this, record);
+
+            AppLogger.Info($"🔔 报警触发: 设备={deviceId}, 严重等级={severity}, 消息={message}", "AlarmManager");
+            AlarmAdded?.Invoke(this, record);
         }
 
         public bool AcknowledgeAlarm(int alarmId, string user)
@@ -183,19 +187,36 @@ namespace GtsTest.Services.Alarm
 
         private AlarmRecord MapAlarm(SqliteDataReader rdr)
         {
+            // 辅助方法：安全解析日期时间
+            DateTime SafeParseDateTime(object value)
+            {
+                if (value == DBNull.Value) return DateTime.MinValue;
+                string s = value.ToString();
+                if (string.IsNullOrEmpty(s)) return DateTime.MinValue;
+                return DateTime.TryParse(s, out var dt) ? dt : DateTime.MinValue;
+            }
+
+            DateTime? SafeParseNullableDateTime(object value)
+            {
+                if (value == DBNull.Value) return null;
+                string s = value.ToString();
+                if (string.IsNullOrEmpty(s)) return null;
+                return DateTime.TryParse(s, out var dt) ? dt : (DateTime?)null;
+            }
+
             return new AlarmRecord
             {
                 Id = rdr.GetInt32(0),
                 DeviceId = rdr.IsDBNull(1) ? null : rdr.GetString(1),
                 Message = rdr.GetString(2),
                 Severity = Enum.Parse<AlarmSeverity>(rdr.GetString(3)),
-                Timestamp = DateTime.Parse(rdr.GetString(4)),
+                Timestamp = SafeParseDateTime(rdr[4]),
                 IsAcknowledged = rdr.GetInt32(5) == 1,
                 IsResolved = rdr.GetInt32(6) == 1,
                 AcknowledgedBy = rdr.IsDBNull(7) ? null : rdr.GetString(7),
                 ResolvedBy = rdr.IsDBNull(8) ? null : rdr.GetString(8),
-                AcknowledgedTime = rdr.IsDBNull(9) ? null : DateTime.Parse(rdr.GetString(9)),
-                ResolvedTime = rdr.IsDBNull(10) ? null : DateTime.Parse(rdr.GetString(10))
+                AcknowledgedTime = SafeParseNullableDateTime(rdr[9]),
+                ResolvedTime = SafeParseNullableDateTime(rdr[10])
             };
         }
     }

@@ -15,7 +15,6 @@
         public SequenceCommand(params IMotionCommand[] commands)
         {
             _commands.AddRange(commands);
-            // 将子命令的日志转发出去
             foreach (var cmd in _commands)
             {
                 cmd.OnLog += msg => OnLog?.Invoke(msg);
@@ -48,9 +47,16 @@
             }
         }
 
+        /// <summary>
+        /// 🆕 增强 Stop：向下传播给所有子命令
+        /// </summary>
         public void Stop()
         {
-            foreach (var cmd in _commands) cmd.Stop();
+            foreach (var cmd in _commands)
+            {
+                try { cmd.Stop(); }
+                catch { /* 忽略单个命令停止异常 */ }
+            }
         }
     }
 }

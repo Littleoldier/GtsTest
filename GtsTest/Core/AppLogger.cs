@@ -324,10 +324,8 @@ namespace GtsTest.Core
 
             try
             {
-                // 通知不再写入：完成写入侧
                 _channel.Writer.Complete();
 
-                // 请求取消（以防 writerTask 卡住）
                 try { _writerCts?.Cancel(); } catch { }
 
                 if (_writerTask != null)
@@ -338,6 +336,9 @@ namespace GtsTest.Core
                     }
                     catch { /* ignore */ }
                 }
+
+                // ✅ 修复：清空静态事件（防止引用泄漏）
+                OnLogReceived = null;
             }
             catch { /* ignore */ }
             finally

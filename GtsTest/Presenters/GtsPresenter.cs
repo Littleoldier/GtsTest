@@ -2,7 +2,6 @@
 using GtsTest.Core;
 using GtsTest.Modbus;
 using GtsTest.Models;
-using GtsTest.Services;
 using GtsTest.Services.Alarm;
 using GtsTest.Services.Authentication;
 using GtsTest.Services.Data;
@@ -24,74 +23,66 @@ namespace GtsTest.Presenters
         private readonly ILogger _logger;
         private readonly IDataRepository _repository;
         private readonly IAlarmManager _alarmManager;
-        private readonly IRecipeManager _recipeManager;
-        private readonly IOpcUaClient _opcUaClient;
-        private readonly IMqttPublisher _mqttPublisher;
         private readonly IAuthenticationService _authService;
 
-        private CancellationTokenSource _workflowCts;
         private string _selectedDeviceId = "";
+        private CancellationTokenSource _workflowCts;
 
         public GtsPresenter(
             IGtsView view,
             GtsModel model,
             DeviceManager deviceManager,
             ILogger logger,
-            IDataRepository repository = null,
-            IAlarmManager alarmManager = null,
-            IRecipeManager recipeManager = null,
-            IOpcUaClient opcUaClient = null,
-            IMqttPublisher mqttPublisher = null,
-            IAuthenticationService authService = null)
+            IDataRepository repository,
+            IAlarmManager alarmManager,
+            IAuthenticationService authService)
         {
-            _view = view;
-            _model = model;
-            _deviceManager = deviceManager;
-            _logger = logger;
+            _view = view ?? throw new ArgumentNullException(nameof(view));
+            _model = model ?? throw new ArgumentNullException(nameof(model));
+            _deviceManager = deviceManager ?? throw new ArgumentNullException(nameof(deviceManager));
+            _logger = logger ?? throw new ArgumentNullException(nameof(logger));
             _repository = repository;
             _alarmManager = alarmManager;
-            _recipeManager = recipeManager;
-            _opcUaClient = opcUaClient;
-            _mqttPublisher = mqttPublisher;
             _authService = authService;
 
-            // ---------- 订阅视图事件 ----------
             _view.LoadView += OnLoadView;
+            _view.DeviceSelected += OnDeviceSelected;
+
             _view.AddDeviceClicked += OnAddDevice;
             _view.RemoveDeviceClicked += OnRemoveDevice;
             _view.StartAllClicked += OnStartAll;
             _view.StopAllClicked += OnStopAll;
-            _view.EmergencyStopClicked += OnEmergencyStop;
+            _view.StartSelectedClicked += OnStartSelected;
+            _view.StopSelectedClicked += OnStopSelected;
+            _view.ResetDeviceClicked += OnResetDevice;
+
             _view.AlarmResetClicked += OnAlarmReset;
-            _view.RunWorkflowClicked += OnRunWorkflow;
-            _view.StopWorkflowClicked += OnStopWorkflow;
-            _view.ToggleSimulatorClicked += OnToggleSimulator;
-            _view.ToggleModbusClicked += OnToggleModbus;
-            _view.ConnectAllModbusClicked += OnConnectAllModbus;
-            _view.DisconnectAllModbusClicked += OnDisconnectAllModbus;
-            _view.SaveConfigClicked += OnSaveConfig;
             _view.AlarmAcknowledgeClicked += OnAlarmAcknowledge;
             _view.AlarmResolveClicked += OnAlarmResolve;
 
-            // ---------- 订阅 DeviceManager 事件 ----------
+            _view.EmergencyStopClicked += OnEmergencyStop;
+
+            _view.SystemConfigClicked += OnSystemConfig;
+            _view.LoginClicked += OnLogin;
+
+            _view.WorkflowRunClicked += OnWorkflowRun;
+            _view.WorkflowStopClicked += OnWorkflowStop;
+            _view.DeviceForWorkflowSelected += OnDeviceForWorkflowSelected;
+            _view.ProductionResetClicked += OnProductionReset;
+            _view.BindDeviceWorkflowClicked += OnBindDeviceWorkflow;
+
+            _view.DeviceForWorkflowSelected += (s, deviceId) =>
+            {
+                _selectedDeviceId = deviceId;
+                UpdateStatusBar();
+            };
+
             _deviceManager.OnDeviceOnlineChanged += (id, online) =>
             {
                 RunOnUI(() =>
                 {
                     _view.UpdateDeviceOnlineStatus(id, online);
-                    if (id == _selectedDeviceId)
-                        UpdateStatusBar();
-                });
-            };
-
-            _deviceManager.OnDeviceDataUpdated += (id, raw, converted) =>
-            {
-                RunOnUI(() =>
-                {
-                    _view.UpdateDeviceData(id, converted);
-                    if (id == _selectedDeviceId)
-                        UpdateStatusBar();
-                    UpdateGlobalStats();
+                    if (id == _selectedDeviceId) UpdateStatusBar();
                 });
             };
 
@@ -100,8 +91,7 @@ namespace GtsTest.Presenters
                 RunOnUI(() =>
                 {
                     _view.UpdateDeviceStep(id, step);
-                    if (id == _selectedDeviceId)
-                        UpdateStatusBar();
+                    if (id == _selectedDeviceId) UpdateStatusBar();
                 });
             };
 
@@ -114,30 +104,27 @@ namespace GtsTest.Presenters
                 });
             };
 
-            // ---------- 订阅报警管理器 ----------
             if (_alarmManager != null)
             {
-                _alarmManager.AlarmAdded += (s, a) => RunOnUI(() => _view.UpdateAlarmList(_alarmManager.GetActiveAlarms()));
-                _alarmManager.AlarmAcknowledged += (s, id) => RunOnUI(() => _view.UpdateAlarmList(_alarmManager.GetActiveAlarms()));
-                _alarmManager.AlarmResolved += (s, id) => RunOnUI(() => _view.UpdateAlarmList(_alarmManager.GetActiveAlarms()));
+                _alarmManager.AlarmAdded += (s, a) => RunOnUI(() => UpdateAlarmList());
+                _alarmManager.AlarmAcknowledged += (s, id) => RunOnUI(() => UpdateAlarmList());
+                _alarmManager.AlarmResolved += (s, id) => RunOnUI(() => UpdateAlarmList());
             }
 
-            // ---------- 订阅日志 ----------
             AppLogger.OnLogReceived += (level, logLine, category) =>
             {
                 RunOnUI(() =>
                 {
-                    if (category == "Monitor" || category == "Modbus")
+                    if (category == "Monitor" || category == "Modbus" || category == "DeviceManager")
                         _view.AppendMonitorLog(logLine);
                     else
                         _view.AppendOperationLog(logLine);
                 });
             };
+
+            SessionManager.OnUserChanged += OnUserChanged;
         }
 
-        // ================================================================
-        // UI 线程调度
-        // ================================================================
         private void RunOnUI(Action action)
         {
             if (_view is Control control && control.InvokeRequired)
@@ -146,9 +133,6 @@ namespace GtsTest.Presenters
                 action();
         }
 
-        // ================================================================
-        // 权限检查
-        // ================================================================
         private bool CheckPermission(string permissionCode)
         {
             var user = SessionManager.CurrentUser;
@@ -165,9 +149,23 @@ namespace GtsTest.Presenters
             return true;
         }
 
-        // ================================================================
-        // 视图加载
-        // ================================================================
+        private bool IsLoggedIn() => SessionManager.CurrentUser != null;
+
+        private void OnUserChanged(User user)
+        {
+            RunOnUI(() =>
+            {
+                string role = user?.Role ?? "未登录";
+                _view.UpdateUIByPermissions(role);
+                if (user != null)
+                    _view.ShowMessage($"欢迎 {user.FullName} ({user.Role})", "登录成功", MessageType.Info);
+                UpdateDeviceList();
+                UpdateStatusBar();
+                UpdateGlobalStats();
+                UpdateAlarmList();
+            });
+        }
+
         private void OnLoadView(object sender, EventArgs e)
         {
             LoadDefaultDevices();
@@ -177,8 +175,9 @@ namespace GtsTest.Presenters
                 UpdateDeviceList();
                 UpdateGlobalStats();
                 UpdateStatusBar();
-                if (_alarmManager != null)
-                    _view.UpdateAlarmList(_alarmManager.GetActiveAlarms());
+                UpdateAlarmList();
+                var user = SessionManager.CurrentUser;
+                _view.UpdateUIByPermissions(user?.Role ?? "未登录");
             });
         }
 
@@ -197,7 +196,7 @@ namespace GtsTest.Presenters
                 }
                 catch (Exception ex)
                 {
-                    _logger.Warn($"加载 devices.json 失败: {ex.Message}，将使用默认设备", "Init");
+                    _logger.Warn($"加载 devices.json 失败: {ex.Message}", "Init");
                 }
             }
 
@@ -205,9 +204,9 @@ namespace GtsTest.Presenters
             {
                 var configs = new[]
                 {
-                    new DeviceConfig { DeviceId = "dev-001", Name = "设备1 - 焊接", Modbus = new ModbusConfig { IpAddress = "192.168.1.10", Port = 502, StartAddress = 0, RegisterCount = 10 }, Axis = 1, TargetCount = 100 },
-                    new DeviceConfig { DeviceId = "dev-002", Name = "设备2 - 检测", Modbus = new ModbusConfig { IpAddress = "192.168.1.11", Port = 502, StartAddress = 100, RegisterCount = 5 }, Axis = 2, TargetCount = 100 },
-                    new DeviceConfig { DeviceId = "dev-003", Name = "设备3 - 包装", Modbus = new ModbusConfig { IpAddress = "192.168.1.12", Port = 502, StartAddress = 200, RegisterCount = 8 }, Axis = 3, TargetCount = 100 }
+                    new DeviceConfig { DeviceId = "dev-001", Name = "设备1-焊接", Modbus = new ModbusConfig { IpAddress = "192.168.1.10", Port = 502, StartAddress = 0, RegisterCount = 10 }, Axis = 1, TargetCount = 100 },
+                    new DeviceConfig { DeviceId = "dev-002", Name = "设备2-检测", Modbus = new ModbusConfig { IpAddress = "192.168.1.11", Port = 502, StartAddress = 100, RegisterCount = 5 }, Axis = 2, TargetCount = 100 },
+                    new DeviceConfig { DeviceId = "dev-003", Name = "设备3-包装", Modbus = new ModbusConfig { IpAddress = "192.168.1.12", Port = 502, StartAddress = 200, RegisterCount = 8 }, Axis = 3, TargetCount = 100 }
                 };
                 foreach (var cfg in configs)
                     _deviceManager.AddDevice(cfg);
@@ -216,9 +215,6 @@ namespace GtsTest.Presenters
             }
         }
 
-        // ================================================================
-        // UI 更新方法
-        // ================================================================
         private void UpdateDeviceList()
         {
             var devices = _deviceManager.GetAllDevices();
@@ -230,12 +226,13 @@ namespace GtsTest.Presenters
             });
             _view.UpdateDeviceList(items);
 
-            string targetId = _selectedDeviceId;
-            if (string.IsNullOrEmpty(targetId) || !devices.Any(d => d.Config.DeviceId == targetId))
-                targetId = devices.Count > 0 ? devices[0].Config.DeviceId : "";
-
-            if (!string.IsNullOrEmpty(targetId))
-                _view.SelectDevice(targetId);
+            if (!string.IsNullOrEmpty(_selectedDeviceId) && devices.Any(d => d.Config.DeviceId == _selectedDeviceId))
+                _view.SelectDevice(_selectedDeviceId);
+            else if (devices.Count > 0)
+            {
+                _selectedDeviceId = devices[0].Config.DeviceId;
+                _view.SelectDevice(_selectedDeviceId);
+            }
         }
 
         private void UpdateGlobalStats()
@@ -285,12 +282,31 @@ namespace GtsTest.Presenters
             );
         }
 
-        // ================================================================
-        // 设备管理
-        // ================================================================
+        private void UpdateAlarmList()
+        {
+            if (_alarmManager != null)
+                _view.UpdateAlarmList(_alarmManager.GetActiveAlarms());
+        }
+
+        private void OnDeviceSelected(object sender, EventArgs e)
+        {
+            _selectedDeviceId = _view.GetSelectedDeviceId();
+            UpdateStatusBar();
+        }
+
+        public void OnDeviceSelected(string deviceId)
+        {
+            _selectedDeviceId = deviceId;
+            RunOnUI(() =>
+            {
+                UpdateStatusBar();
+                _view.SelectDevice(deviceId);
+            });
+        }
+
         private void OnAddDevice(object sender, EventArgs e)
         {
-            if (!CheckPermission("Config.Edit")) return;
+            if (!CheckPermission("Device.Add")) return;
             using (var form = new DeviceConfigForm())
             {
                 if (form.ShowDialog() == DialogResult.OK)
@@ -300,6 +316,7 @@ namespace GtsTest.Presenters
                     {
                         UpdateDeviceList();
                         UpdateGlobalStats();
+                        _view.ShowMessage($"设备 {form.Config.Name} 添加成功", "提示", MessageType.Info);
                     });
                 }
             }
@@ -307,7 +324,7 @@ namespace GtsTest.Presenters
 
         private void OnRemoveDevice(object sender, EventArgs e)
         {
-            if (!CheckPermission("Config.Delete")) return;
+            if (!CheckPermission("Device.Remove")) return;
             string id = _view.GetSelectedDeviceId();
             if (string.IsNullOrEmpty(id)) return;
             var device = _deviceManager.GetDevice(id);
@@ -317,21 +334,21 @@ namespace GtsTest.Presenters
             {
                 _deviceManager.StopDevice(id);
                 _deviceManager.RemoveDevice(id);
+                if (_selectedDeviceId == id)
+                    _selectedDeviceId = "";
                 RunOnUI(() =>
                 {
                     UpdateDeviceList();
                     UpdateGlobalStats();
                     UpdateStatusBar();
+                    _view.ShowMessage($"设备 {device.Config.Name} 已移除", "提示", MessageType.Info);
                 });
             }
         }
 
-        // ================================================================
-        // 产线控制
-        // ================================================================
         private void OnStartAll(object sender, EventArgs e)
         {
-            if (!CheckPermission("Device.Start")) return;
+            if (!CheckPermission("Device.StartAll")) return;
             var devices = _deviceManager.GetAllDevices();
             int offline = devices.Count(d => !d.IsOnline);
             if (offline > 0)
@@ -341,32 +358,235 @@ namespace GtsTest.Presenters
             }
             _deviceManager.StartAllDevices();
             var user = SessionManager.CurrentUser;
-            AuditService.Log(user.Id, user.Username, "StartAllDevices", "启动全部设备", _repository);
+            AuditService.Log(user?.Id ?? 0, user?.Username ?? "系统", "StartAllDevices", "启动全部设备", _repository);
+            RunOnUI(() =>
+            {
+                UpdateDeviceList();
+                UpdateStatusBar();
+                _view.ShowMessage("全部设备已启动", "提示", MessageType.Info);
+            });
         }
 
         private void OnStopAll(object sender, EventArgs e)
         {
-            if (!CheckPermission("Device.Stop")) return;
+            if (!CheckPermission("Device.StopAll")) return;
+            if (!_view.ShowConfirm("确定停止所有设备吗？", "确认停止"))
+                return;
             _deviceManager.StopAllDevices();
             var user = SessionManager.CurrentUser;
-            AuditService.Log(user.Id, user.Username, "StopAllDevices", "停止全部设备", _repository);
-            RunOnUI(UpdateStatusBar);
+            AuditService.Log(user?.Id ?? 0, user?.Username ?? "系统", "StopAllDevices", "停止全部设备", _repository);
+            RunOnUI(() =>
+            {
+                UpdateDeviceList();
+                UpdateStatusBar();
+                _view.ShowMessage("全部设备已停止", "提示", MessageType.Info);
+            });
         }
 
-        private void OnEmergencyStop(object sender, EventArgs e)
+        private void OnStartSelected(object sender, EventArgs e)
         {
-            if (!CheckPermission("EmergencyStop")) return;
-            _deviceManager.StopAllDevices();
-            _model.GT_Stop(0xFF, 0);
-            _logger.Warn("全局急停触发！", "Operation");
-            var user = SessionManager.CurrentUser;
-            AuditService.Log(user.Id, user.Username, "EmergencyStop", "触发全局急停", _repository);
-            _view.ShowMessage("全局急停已触发，所有运动停止", "急停", MessageType.Warning);
+            if (!CheckPermission("Device.Start")) return;
+            string deviceId = _selectedDeviceId;
+            if (string.IsNullOrEmpty(deviceId))
+            {
+                _view.ShowMessage("请先选择一个设备", "提示", MessageType.Warning);
+                return;
+            }
+            var device = _deviceManager.GetDevice(deviceId);
+            if (device == null) return;
+            if (!device.IsOnline)
+            {
+                _view.ShowMessage($"设备 {device.Config.Name} 不在线，无法启动", "警告", MessageType.Warning);
+                return;
+            }
+            if (device.IsRunning)
+            {
+                _view.ShowMessage($"设备 {device.Config.Name} 已在运行中", "提示", MessageType.Info);
+                return;
+            }
+
+            string workflowName = _view.GetSelectedWorkflowName();
+            if (string.IsNullOrEmpty(workflowName))
+            {
+                // 弹出选择工作流对话框
+                string dir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Workflows");
+                var files = Directory.Exists(dir) ? Directory.GetFiles(dir, "*.json") : new string[0];
+                var workflowNames = files.Select(f => Path.GetFileNameWithoutExtension(f)).ToList();
+                if (workflowNames.Count == 0)
+                {
+                    _view.ShowMessage("没有可用的工作流文件，请先在系统管理中创建工作流", "错误", MessageType.Error);
+                    return;
+                }
+                using (var form = new Form())
+                {
+                    form.Text = "选择工作流";
+                    form.Size = new Size(300, 150);
+                    form.StartPosition = FormStartPosition.CenterParent;
+                    form.FormBorderStyle = FormBorderStyle.FixedDialog;
+                    form.MaximizeBox = false;
+                    form.MinimizeBox = false;
+                    var combo = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Dock = DockStyle.Top, Height = 30 };
+                    combo.Items.AddRange(workflowNames.ToArray());
+                    if (combo.Items.Count > 0) combo.SelectedIndex = 0;
+                    var btnOK = new Button { Text = "确定", DialogResult = DialogResult.OK, Dock = DockStyle.Bottom, Height = 35 };
+                    var btnCancel = new Button { Text = "取消", DialogResult = DialogResult.Cancel, Dock = DockStyle.Bottom, Height = 35 };
+                    var panel = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown };
+                    panel.Controls.Add(combo);
+                    panel.Controls.Add(btnOK);
+                    panel.Controls.Add(btnCancel);
+                    form.Controls.Add(panel);
+                    if (form.ShowDialog() != DialogResult.OK) return;
+                    workflowName = combo.SelectedItem?.ToString() ?? "";
+                }
+                if (string.IsNullOrEmpty(workflowName))
+                {
+                    _view.ShowMessage("未选择工作流", "提示", MessageType.Warning);
+                    return;
+                }
+            }
+
+            if (!_deviceManager.SetDeviceWorkflow(deviceId, workflowName))
+            {
+                _view.ShowMessage($"设置工作流失败，设备可能正在运行", "错误", MessageType.Error);
+                return;
+            }
+
+            if (_deviceManager.StartDevice(deviceId))
+            {
+                var user = SessionManager.CurrentUser;
+                AuditService.Log(user?.Id ?? 0, user?.Username ?? "系统", "DeviceStart", $"启动设备 {device.Config.Name}，工作流: {workflowName}", _repository);
+                _view.ShowMessage($"设备 {device.Config.Name} 已启动，工作流: {workflowName}", "提示", MessageType.Info);
+                UpdateStatusBar();
+                UpdateDeviceList();
+            }
+            else
+            {
+                _view.ShowMessage($"设备 {device.Config.Name} 启动失败", "错误", MessageType.Error);
+            }
         }
 
-        // ================================================================
-        // 报警处理
-        // ================================================================
+        private void OnBindDeviceWorkflow(object sender, EventArgs e)
+        {
+            if (!CheckPermission("Workflow.Bind")) return;
+
+            string deviceName = _view.GetSelectedDeviceName();
+            string workflowName = _view.GetSelectedWorkflowName();
+
+            if (string.IsNullOrEmpty(deviceName))
+            {
+                _view.ShowMessage("请先选择设备", "提示", MessageType.Warning);
+                return;
+            }
+            if (string.IsNullOrEmpty(workflowName))
+            {
+                _view.ShowMessage("请先选择工作流", "提示", MessageType.Warning);
+                return;
+            }
+
+            var device = _deviceManager.GetAllDevices().FirstOrDefault(d => d.Config.Name == deviceName);
+            if (device == null)
+            {
+                _view.ShowMessage("设备未找到", "错误", MessageType.Error);
+                return;
+            }
+
+            if (_deviceManager.SetBoundWorkflow(device.Config.DeviceId, workflowName))
+            {
+                _view.ShowMessage($"设备 {deviceName} 已绑定工作流: {workflowName}", "绑定成功", MessageType.Info);
+                var user = SessionManager.CurrentUser;
+                AuditService.Log(user?.Id ?? 0, user?.Username ?? "系统", "BindWorkflow", $"设备 {deviceName} 绑定工作流 {workflowName}", _repository);
+            }
+            else
+            {
+                _view.ShowMessage("绑定失败，请重试", "错误", MessageType.Error);
+            }
+        }
+
+        private void OnStopSelected(object sender, EventArgs e)
+        {
+            if (!CheckPermission("Device.Stop")) return;
+            string deviceId = _selectedDeviceId;
+            if (string.IsNullOrEmpty(deviceId))
+            {
+                _view.ShowMessage("请先选择一个设备", "提示", MessageType.Warning);
+                return;
+            }
+            var device = _deviceManager.GetDevice(deviceId);
+            if (device == null) return;
+            if (!device.IsRunning)
+            {
+                _view.ShowMessage($"设备 {device.Config.Name} 未在运行", "提示", MessageType.Info);
+                return;
+            }
+            if (!_view.ShowConfirm($"确定停止设备 {device.Config.Name} 吗？", "确认停止"))
+                return;
+            if (_deviceManager.StopDevice(deviceId))
+            {
+                var user = SessionManager.CurrentUser;
+                AuditService.Log(user?.Id ?? 0, user?.Username ?? "系统", "DeviceStop", $"停止设备 {device.Config.Name}", _repository);
+                _view.ShowMessage($"设备 {device.Config.Name} 已停止", "提示", MessageType.Info);
+                UpdateStatusBar();
+                UpdateDeviceList();
+            }
+            else
+            {
+                _view.ShowMessage($"设备 {device.Config.Name} 停止失败", "错误", MessageType.Error);
+            }
+        }
+
+        private async void OnResetDevice(object sender, EventArgs e)
+        {
+            if (!CheckPermission("Device.Reset")) return;
+            string deviceId = _selectedDeviceId;
+            if (string.IsNullOrEmpty(deviceId))
+            {
+                _view.ShowMessage("请先选择一个设备", "提示", MessageType.Warning);
+                return;
+            }
+            var device = _deviceManager.GetDevice(deviceId);
+            if (device == null) return;
+
+            var result = MessageBox.Show(
+                $"请选择复位模式：\n\n" +
+                $"• 点击「是」= 软复位（从断点继续，保留产量）\n" +
+                $"• 点击「否」= 硬复位（产量归零，从头开始）",
+                "选择复位模式",
+                MessageBoxButtons.YesNoCancel,
+                MessageBoxIcon.Question);
+
+            DeviceManager.ResetMode mode;
+            if (result == DialogResult.Yes)
+                mode = DeviceManager.ResetMode.SoftReset;
+            else if (result == DialogResult.No)
+                mode = DeviceManager.ResetMode.HardReset;
+            else
+                return;
+
+            string confirmMsg = mode == DeviceManager.ResetMode.SoftReset
+                ? $"确定要软复位设备 {device.Config.Name} 吗？"
+                : $"⚠️ 硬复位将清零产量 {device.Config.Name}，确定要继续吗？";
+
+            if (!_view.ShowConfirm(confirmMsg, "确认复位"))
+                return;
+
+            var user = SessionManager.CurrentUser;
+            bool success = await _deviceManager.ResetWorkflowAsync(deviceId, mode, user?.Username ?? "操作员");
+
+            if (success)
+            {
+                _view.ShowMessage($"设备 {device.Config.Name} 工作流已复位", "提示", MessageType.Info);
+                UpdateStatusBar();
+                UpdateDeviceList();
+                UpdateGlobalStats();
+            }
+            else
+            {
+                _view.ShowMessage($"设备 {device.Config.Name} 复位失败", "错误", MessageType.Error);
+            }
+        }
+
+        // 报警方法等省略（与之前相同）...
+
         private void OnAlarmReset(object sender, EventArgs e)
         {
             if (!CheckPermission("Alarm.Reset")) return;
@@ -383,16 +603,16 @@ namespace GtsTest.Presenters
             {
                 if (!alarm.IsAcknowledged)
                 {
-                    if (_alarmManager.AcknowledgeAlarm(alarm.Id, user.Username))
+                    if (_alarmManager.AcknowledgeAlarm(alarm.Id, user?.Username ?? "系统"))
                         count++;
                 }
                 if (!alarm.IsResolved)
                 {
-                    if (_alarmManager.ResolveAlarm(alarm.Id, user.Username))
+                    if (_alarmManager.ResolveAlarm(alarm.Id, user?.Username ?? "系统"))
                         count++;
                 }
             }
-            AuditService.Log(user.Id, user.Username, "ResetAlarms", $"复位了 {count} 个报警", _repository);
+            AuditService.Log(user?.Id ?? 0, user?.Username ?? "系统", "ResetAlarms", $"复位了 {count} 个报警", _repository);
             _view.ShowMessage($"已复位 {count} 个报警", "提示", MessageType.Info);
         }
 
@@ -406,9 +626,9 @@ namespace GtsTest.Presenters
                 return;
             }
             var user = SessionManager.CurrentUser;
-            if (_alarmManager.AcknowledgeAlarm(alarmId, user.Username))
+            if (_alarmManager.AcknowledgeAlarm(alarmId, user?.Username ?? "系统"))
             {
-                AuditService.Log(user.Id, user.Username, "AcknowledgeAlarm", $"确认报警 {alarmId}", _repository);
+                AuditService.Log(user?.Id ?? 0, user?.Username ?? "系统", "AcknowledgeAlarm", $"确认报警 {alarmId}", _repository);
                 _view.ShowMessage("报警已确认", "提示", MessageType.Info);
             }
             else
@@ -427,9 +647,9 @@ namespace GtsTest.Presenters
                 return;
             }
             var user = SessionManager.CurrentUser;
-            if (_alarmManager.ResolveAlarm(alarmId, user.Username))
+            if (_alarmManager.ResolveAlarm(alarmId, user?.Username ?? "系统"))
             {
-                AuditService.Log(user.Id, user.Username, "ResolveAlarm", $"解决报警 {alarmId}", _repository);
+                AuditService.Log(user?.Id ?? 0, user?.Username ?? "系统", "ResolveAlarm", $"解决报警 {alarmId}", _repository);
                 _view.ShowMessage("报警已解决", "提示", MessageType.Info);
             }
             else
@@ -438,240 +658,163 @@ namespace GtsTest.Presenters
             }
         }
 
-        // ================================================================
-        // Modbus 连接管理
-        // ================================================================
-        private void OnToggleModbus(object sender, EventArgs e)
+        private void OnEmergencyStop(object sender, EventArgs e)
         {
-            if (!CheckPermission("Modbus.Connect")) return;
-            string id = _view.GetSelectedDeviceId();
-            if (string.IsNullOrEmpty(id))
-            {
-                _view.ShowMessage("请先选择一个设备", "提示", MessageType.Warning);
-                return;
-            }
-
-            var device = _deviceManager.GetDevice(id);
-            if (device == null) return;
-
-            if (device.IsOnline)
-            {
-                device.ModbusClient.Disconnect();
-                _logger.Info($"设备 {device.Config.Name} Modbus 已断开", "UI");
-            }
-            else
-            {
-                bool success = device.ModbusClient.Connect();
-                if (success)
-                {
-                    _logger.Info($"设备 {device.Config.Name} Modbus 连接成功", "UI");
-                    var user = SessionManager.CurrentUser;
-                    AuditService.Log(user.Id, user.Username, "ModbusConnect", $"连接设备 {device.Config.Name}", _repository);
-                }
-                else
-                    _view.ShowMessage($"设备 {device.Config.Name} 连接失败", "错误", MessageType.Error);
-            }
-
-            RunOnUI(() =>
-            {
-                UpdateStatusBar();
-                UpdateDeviceList();
-            });
-        }
-
-        private void OnConnectAllModbus(object sender, EventArgs e)
-        {
-            if (!CheckPermission("Modbus.Connect")) return;
-            var devices = _deviceManager.GetAllDevices();
-            if (devices.Count == 0)
-            {
-                _view.ShowMessage("没有设备", "提示", MessageType.Info);
-                return;
-            }
-
-            int success = 0, already = 0, fail = 0;
-            var failedNames = new List<string>();
-            foreach (var dev in devices)
-            {
-                if (dev.IsOnline) { already++; continue; }
-                if (dev.ModbusClient.Connect()) success++;
-                else { fail++; failedNames.Add(dev.Config.Name); }
-            }
-
-            string msg = $"连接完成：成功 {success}，已连接 {already}，失败 {fail}";
-            if (fail > 0) msg += $"\n失败设备: {string.Join(", ", failedNames)}";
-            _view.ShowMessage(msg, "批量连接", fail > 0 ? MessageType.Warning : MessageType.Info);
-
-            if (success > 0)
-            {
-                var user = SessionManager.CurrentUser;
-                AuditService.Log(user.Id, user.Username, "ConnectAllModbus", $"成功连接 {success} 台设备", _repository);
-            }
-
-            RunOnUI(() =>
-            {
-                UpdateDeviceList();
-                UpdateStatusBar();
-            });
-        }
-
-        private void OnDisconnectAllModbus(object sender, EventArgs e)
-        {
-            if (!CheckPermission("Modbus.Connect")) return;
-            var devices = _deviceManager.GetAllDevices();
-            if (devices.Count == 0)
-            {
-                _view.ShowMessage("没有设备", "提示", MessageType.Info);
-                return;
-            }
-
-            int success = 0, already = 0, fail = 0;
-            var failedNames = new List<string>();
-            foreach (var dev in devices)
-            {
-                if (!dev.IsOnline) { already++; continue; }
-                try { dev.ModbusClient.Disconnect(); success++; }
-                catch { fail++; failedNames.Add(dev.Config.Name); }
-            }
-
-            string msg = $"断开完成：成功 {success}，已断开 {already}，失败 {fail}";
-            if (fail > 0) msg += $"\n失败设备: {string.Join(", ", failedNames)}";
-            _view.ShowMessage(msg, "批量断开", fail > 0 ? MessageType.Warning : MessageType.Info);
-
-            RunOnUI(() =>
-            {
-                UpdateDeviceList();
-                UpdateStatusBar();
-            });
-        }
-
-        // ================================================================
-        // 保存配置
-        // ================================================================
-        private void OnSaveConfig(object sender, EventArgs e)
-        {
-            if (!CheckPermission("Config.Edit")) return;
-            string json = _deviceManager.ExportConfig();
-            string path = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "devices.json");
-            File.WriteAllText(path, json);
-            _logger.Info($"配置已保存至 {path}", "Operation");
-            var user = SessionManager.CurrentUser;
-            AuditService.Log(user.Id, user.Username, "SaveConfig", $"保存配置到 {path}", _repository);
-            _view.ShowMessage($"配置已保存到 {path}", "提示", MessageType.Info);
-        }
-
-        // ================================================================
-        // 模拟模式切换
-        // ================================================================
-        private void OnToggleSimulator(object sender, EventArgs e)
-        {
-            if (!CheckPermission("System.ToggleMode")) return;
-            bool isCurrentlySimulation = GtsModel.UseSimulation;
-            bool willSwitchToReal = isCurrentlySimulation;
-
-            if (willSwitchToReal)
-            {
-                if (!GtsModel.CheckHardwareAvailable())
-                {
-                    _view.ShowMessage(
-                        "未检测到固高运动控制卡或驱动。\n请确认：\n1. 已安装 gts.dll 驱动\n2. 运动控制卡已正确连接",
-                        "切换失败",
-                        MessageType.Warning);
-                    return;
-                }
-
-                short openResult = _model.OpenDevice(0, 0);
-                if (openResult != 0)
-                {
-                    _view.ShowMessage(
-                        $"运动控制卡打开失败，错误码: {openResult}\n请检查硬件连接和电源。",
-                        "切换失败",
-                        MessageType.Error);
-                    _model.CloseDevice();
-                    return;
-                }
-                _model.CloseDevice();
-                _logger.Info("硬件检测通过", "Operation");
-            }
-
-            // 执行切换
             _deviceManager.StopAllDevices();
-            _model.CloseDevice();
-            GtsModel.UseSimulation = !isCurrentlySimulation;
-            _view.ClearLogs();
-            _logger.Info(GtsModel.UseSimulation ? "模拟模式已开启" : "真实硬件模式已开启", "Operation");
-
-            if (!GtsModel.UseSimulation)
-            {
-                short result = _model.OpenDevice(0, 0);
-                if (result != 0)
-                {
-                    _view.ShowMessage($"打开卡失败，错误码: {result}，已退回模拟模式", "错误", MessageType.Error);
-                    GtsModel.UseSimulation = true;
-                    _logger.Warn("真实模式打开卡失败，退回模拟模式", "Operation");
-                }
-                else
-                {
-                    _logger.Info("运动控制卡已成功打开", "Operation");
-                }
-            }
-            _view.SetSimulationMode(GtsModel.UseSimulation);
+            _model.GT_Stop(0xFF, 0);
+            _logger.Warn("⚠️ 全局急停触发！", "Operation");
             var user = SessionManager.CurrentUser;
-            AuditService.Log(user.Id, user.Username, "ToggleMode", $"切换到 {(GtsModel.UseSimulation ? "模拟" : "真实")} 模式", _repository);
+            AuditService.Log(
+                user?.Id ?? 0,
+                user?.Username ?? "未登录",
+                "EmergencyStop",
+                "全局急停触发（紧急停止）",
+                _repository
+            );
+            _view.ShowMessage("全局急停已触发，所有运动停止", "急停", MessageType.Warning);
+            RunOnUI(() =>
+            {
+                UpdateDeviceList();
+                UpdateStatusBar();
+            });
         }
 
-        // ================================================================
-        // 工作流
-        // ================================================================
-        private void OnRunWorkflow(object sender, EventArgs e)
+        private void OnLogin(object sender, EventArgs e)
+        {
+            if (SessionManager.IsLoggedIn)
+            {
+                SessionManager.Logout(_repository);
+                _view.ShowMessage("已注销", "提示", MessageType.Info);
+                return;
+            }
+            using (var login = new LoginForm(_authService, _repository))
+            {
+                if (login.ShowDialog() == DialogResult.OK)
+                {
+                    // SessionManager 已触发 OnUserChanged
+                }
+            }
+        }
+
+        private void OnSystemConfig(object sender, EventArgs e)
+        {
+            if (!CheckPermission("System.Config")) return;
+            var user = SessionManager.CurrentUser;
+            using (var form = new SystemConfigForm(
+                _deviceManager,
+                _model,
+                _repository,
+                _authService,
+                user))
+            {
+                form.ShowDialog(_view as Form);
+            }
+        }
+
+        private void OnDeviceForWorkflowSelected(object sender, string deviceId)
+        {
+            _selectedDeviceId = deviceId;
+            UpdateStatusBar();
+        }
+
+        private void OnWorkflowRun(object sender, string workflowName)
         {
             if (!CheckPermission("Workflow.Run")) return;
-            var devices = _deviceManager.GetAllDevices();
-            if (devices.Count == 0)
+            if (string.IsNullOrEmpty(_selectedDeviceId))
             {
-                _view.ShowMessage("没有设备可用", "提示", MessageType.Warning);
+                _view.ShowMessage("请先选择一台设备", "提示", MessageType.Warning);
                 return;
             }
-
-            string selectedId = _view.GetSelectedDeviceId();
-            var target = _deviceManager.GetDevice(selectedId) ?? devices[0];
-
-            string workflowName = "Default";
+            var device = _deviceManager.GetDevice(_selectedDeviceId);
+            if (device == null || !device.IsOnline)
+            {
+                _view.ShowMessage("设备不在线，无法运行工作流", "提示", MessageType.Warning);
+                return;
+            }
+            if (string.IsNullOrEmpty(workflowName))
+            {
+                _view.ShowMessage("请选择工作流", "提示", MessageType.Warning);
+                return;
+            }
             string filePath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Workflows", workflowName + ".json");
             if (!File.Exists(filePath))
             {
-                _view.ShowMessage($"工作流文件 {filePath} 不存在", "错误", MessageType.Error);
+                _view.ShowMessage($"工作流文件 {workflowName}.json 不存在", "错误", MessageType.Error);
+                return;
+            }
+            var config = LoadWorkflowFromJson(filePath);
+            if (config == null)
+            {
+                _view.ShowMessage("工作流加载失败", "错误", MessageType.Error);
                 return;
             }
 
-            var config = LoadWorkflowFromJson(filePath);
-            if (config == null) return;
+            string logMsg = $"启动工作流: {workflowName} (文件: {filePath}, 共 {config.Commands.Count} 条命令)";
+            _logger.Info(logMsg, "Operation");
+            _view.AppendExecutionLog(logMsg);
+            _view.AppendExecutionLog($"设备: {device.Config.Name}");
 
-            foreach (var cmdCfg in config.Commands)
-                if (cmdCfg.Axis == 0) cmdCfg.Axis = target.Config.Axis;
+            if (device.IsRunning)
+            {
+                _view.AppendExecutionLog("⏹ 设备正在运行，先停止...");
+                _deviceManager.StopDevice(_selectedDeviceId);
+                Thread.Sleep(500);
+                _view.AppendExecutionLog("✅ 设备已停止");
+            }
 
-            _workflowCts?.Cancel();
-            _workflowCts = new CancellationTokenSource();
-            var token = _workflowCts.Token;
-
-            var commands = config.Commands.Select(cfg => CommandFactory.Create(_model, cfg)).ToList();
-            var workflow = new SequenceCommand(commands.ToArray());
-            workflow.OnLog += msg => _logger.Info(msg, "Workflow");
-
-            var thread = new Thread(() => workflow.Execute(token)) { IsBackground = true };
-            thread.Start();
-            _logger.Info($"启动工作流: {config.Name} 设备: {target.Config.Name}", "Operation");
-            var user = SessionManager.CurrentUser;
-            AuditService.Log(user.Id, user.Username, "RunWorkflow", $"启动工作流 {config.Name} 在设备 {target.Config.Name}", _repository);
+            if (_deviceManager.StartDevice(_selectedDeviceId, workflowName))
+            {
+                _view.ShowMessage($"设备 {device.Config.Name} 已启动，工作流: {workflowName}", "提示", MessageType.Info);
+                _view.AppendExecutionLog($"✅ 设备 {device.Config.Name} 已启动，工作流: {workflowName}");
+                var user = SessionManager.CurrentUser;
+                AuditService.Log(user?.Id ?? 0, user?.Username ?? "系统", "RunWorkflow", $"启动工作流 {workflowName} 在设备 {device.Config.Name}", _repository);
+            }
+            else
+            {
+                _view.AppendExecutionLog($"❌ 设备 {device.Config.Name} 启动失败");
+                _view.ShowMessage($"设备 {device.Config.Name} 启动失败", "错误", MessageType.Error);
+            }
         }
 
-        private void OnStopWorkflow(object sender, EventArgs e)
+        private void OnWorkflowStop(object sender, EventArgs e)
         {
             if (!CheckPermission("Workflow.Stop")) return;
+            if (!string.IsNullOrEmpty(_selectedDeviceId))
+            {
+                var device = _deviceManager.GetDevice(_selectedDeviceId);
+                if (device != null && device.IsRunning)
+                {
+                    _view.AppendExecutionLog($"⏹ 正在停止设备 {device.Config.Name}...");
+                    _deviceManager.StopDevice(_selectedDeviceId);
+                    _view.AppendExecutionLog($"✅ 设备 {device.Config.Name} 已停止");
+                }
+            }
             _workflowCts?.Cancel();
             _logger.Info("工作流已停止", "Operation");
+            _view.AppendExecutionLog("⏹ 工作流已停止");
             var user = SessionManager.CurrentUser;
-            AuditService.Log(user.Id, user.Username, "StopWorkflow", "停止工作流", _repository);
+            AuditService.Log(user?.Id ?? 0, user?.Username ?? "系统", "StopWorkflow", "停止工作流", _repository);
+            _view.ShowMessage("工作流已停止", "提示", MessageType.Info);
+        }
+
+        private void OnProductionReset(object sender, EventArgs e)
+        {
+            if (!CheckPermission("Production.Reset")) return;
+            if (string.IsNullOrEmpty(_selectedDeviceId))
+            {
+                _view.ShowMessage("请先选择一台设备", "提示", MessageType.Warning);
+                return;
+            }
+            var device = _deviceManager.GetDevice(_selectedDeviceId);
+            if (device == null) return;
+            if (!_view.ShowConfirm($"确定要清零设备 {device.Config.Name} 的产量吗？", "确认清零"))
+                return;
+            device.Config.CurrentCount = 0;
+            _view.UpdateDeviceProduction(_selectedDeviceId, 0, device.Config.TargetCount);
+            UpdateGlobalStats();
+            var user = SessionManager.CurrentUser;
+            AuditService.Log(user?.Id ?? 0, user?.Username ?? "系统", "ProductionReset", $"清零设备 {device.Config.Name} 产量", _repository);
+            _view.ShowMessage($"设备 {device.Config.Name} 产量已清零", "提示", MessageType.Info);
         }
 
         private WorkflowConfig LoadWorkflowFromJson(string path)
@@ -685,27 +828,6 @@ namespace GtsTest.Presenters
             {
                 return null;
             }
-        }
-
-        // ================================================================
-        // 设备选择
-        // ================================================================
-        public void OnDeviceSelected(string deviceId)
-        {
-            _selectedDeviceId = deviceId;
-            RunOnUI(() =>
-            {
-                UpdateStatusBar();
-                var device = _deviceManager.GetDevice(deviceId);
-                if (device != null)
-                {
-                    uint clk;
-                    double pos = 0, vel = 0;
-                    _model.GetPrfPos(device.Config.Axis, out pos, out clk);
-                    _model.GetPrfVel(device.Config.Axis, out vel, out clk);
-                    // 轴信息现在不显示在主界面，但可通过状态栏更新
-                }
-            });
         }
     }
 }
