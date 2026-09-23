@@ -1,0 +1,56 @@
+# ==================== 编译输出 ====================
+bin/
+obj/
+[Dd]ebug/
+[Rr]elease/
+*.dll
+*.exe
+*.pdb
+*.cache
+*.log
+
+# ==================== Visual Studio ====================
+.vs/
+*.user
+*.suo
+*.userprefs
+*.sln.docstates
+
+# ==================== Rider / VS Code ====================
+.idea/
+.vscode/
+
+# ==================== 运行时生成 ====================
+Logs/
+VisionLogs/
+Images/*.png.bak
+gts.db
+gts.db-shm
+gts.db-wal
+*.db
+*.db-shm
+*.db-wal
+
+# ==================== 固高 SDK（版权限制）====================
+gts.dll
+gts.lib
+
+# ==================== NuGet ====================
+packages/
+*.nupkg
+project.lock.json
+project.assets.json
+
+# ==================== 用户配置（保留模板，忽略实例）====================
+# 注意：devices.json / mes_config.json / appsettings.json
+#      如果你想让他们作为模板上传，就不要忽略
+# devices.json
+# mes_config.json
+# appsettings.json
+
+# ==================== 临时文件 ====================
+*.tmp
+*.bak
+*.swp
+Thumbs.db
+Desktop.ini
