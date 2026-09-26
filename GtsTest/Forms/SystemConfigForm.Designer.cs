@@ -11,13 +11,13 @@ namespace GtsTest
         // ==================== 控件声明 ====================
         private TabControl tabMain;
         private TabPage tabWorkflow;
-        private TabPage tabComm;          // OPC UA 通信配置
-        private TabPage tabMqtt;          // 🆕 MQTT 独立 Tab
+        private TabPage tabComm;
+        private TabPage tabMqtt;
         private TabPage tabDebug;
         private TabPage tabSystemTools;
         private TabPage tabAdmin;
 
-        // 系统工具控件
+        // ---- 系统工具 ----
         private Button btnInit;
         private Button btnToggleMode;
         private Button btnHotReload;
@@ -25,8 +25,13 @@ namespace GtsTest
         private Button btnDumpBlackBox;
         private Button btnClearLogs;
         private Button btnDiagnostics;
+        private Button btnExportDiagnostic;
+        private Button btnOpenFrameMonitor;   // 🆕 报文监视器
 
-
+        // ---- 日志级别 ----
+        private Label lblCurrentLogLevel;
+        private ComboBox cmbLogLevel;
+        private Button btnApplyLogLevel;
 
         private void InitializeComponent()
         {
@@ -46,15 +51,13 @@ namespace GtsTest
             tabMain.Padding = new Point(8, 3);
             tabMain.Font = new Font("Segoe UI", 9F);
 
-            // ---- 定义所有 Tab 页 ----
             tabWorkflow = new TabPage { Text = "📝 工作流", Padding = new Padding(6) };
             tabComm = new TabPage { Text = "🌐 OPC UA", Padding = new Padding(6) };
-            tabMqtt = new TabPage { Text = "📨 MQTT", Padding = new Padding(6) };   // 🆕 MQTT 独立
+            tabMqtt = new TabPage { Text = "📨 MQTT", Padding = new Padding(6) };
             tabDebug = new TabPage { Text = "🔧 调试工具", Padding = new Padding(6) };
             tabSystemTools = new TabPage { Text = "⚙️ 系统工具", Padding = new Padding(6) };
             tabAdmin = new TabPage { Text = "👤 用户管理", Padding = new Padding(6) };
 
-            // ---- 添加到 TabControl ----
             tabMain.Controls.Add(tabWorkflow);
             tabMain.Controls.Add(tabComm);
             tabMain.Controls.Add(tabMqtt);
@@ -68,7 +71,7 @@ namespace GtsTest
         }
 
         // ================================================================
-        // 系统工具 Tab 内容构建（使用 TableLayoutPanel，自适应宽度）
+        // 系统工具 Tab 内容（4 个分组）
         // ================================================================
         private void BuildSystemToolsContent()
         {
@@ -105,7 +108,9 @@ namespace GtsTest
             mainTable.Controls.Add(lblTitle, 0, mainTable.RowCount);
             mainTable.RowCount++;
 
-            // ---- 1. 系统控制分组 ----
+            // ================================================================
+            // 1. 系统控制
+            // ================================================================
             var grpControl = new GroupBox
             {
                 Text = "🖥️ 系统控制",
@@ -174,7 +179,9 @@ namespace GtsTest
             mainTable.Controls.Add(grpControl, 0, mainTable.RowCount);
             mainTable.RowCount++;
 
-            // ---- 2. 模拟模式分组 ----
+            // ================================================================
+            // 2. 模拟模式
+            // ================================================================
             var grpMode = new GroupBox
             {
                 Text = "🎯 模拟模式",
@@ -220,7 +227,9 @@ namespace GtsTest
             mainTable.Controls.Add(grpMode, 0, mainTable.RowCount);
             mainTable.RowCount++;
 
-            // ---- 3. 运维工具分组 ----
+            // ================================================================
+            // 3. 运维工具（4 列 2 行）
+            // ================================================================
             var grpTools = new GroupBox
             {
                 Text = "📦 运维工具",
@@ -228,19 +237,22 @@ namespace GtsTest
                 Padding = new Padding(10),
                 Dock = DockStyle.Fill,
                 AutoSize = true,
-                MinimumSize = new Size(400, 55)
+                MinimumSize = new Size(400, 110)
             };
             var toolsTable = new TableLayoutPanel
             {
                 Dock = DockStyle.Fill,
-                ColumnCount = 3,
-                RowCount = 1,
+                ColumnCount = 4,
+                RowCount = 2,
                 AutoSize = true,
                 Padding = new Padding(5)
             };
-            toolsTable.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33F));
-            toolsTable.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33F));
-            toolsTable.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 34F));
+            toolsTable.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 25F));
+            toolsTable.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 25F));
+            toolsTable.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 25F));
+            toolsTable.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 25F));
+            toolsTable.RowStyles.Add(new RowStyle(SizeType.Absolute, 40F));
+            toolsTable.RowStyles.Add(new RowStyle(SizeType.Absolute, 42F));
 
             btnDumpBlackBox = new Button
             {
@@ -266,13 +278,99 @@ namespace GtsTest
                 BackColor = Color.LightCyan,
                 Margin = new Padding(3)
             };
+            btnOpenFrameMonitor = new Button
+            {
+                Text = "🔍 报文监视器",
+                Dock = DockStyle.Fill,
+                FlatStyle = FlatStyle.Flat,
+                BackColor = Color.LightSkyBlue,
+                Font = new Font("Segoe UI", 9F, FontStyle.Bold),
+                Margin = new Padding(3)
+            };
+            btnExportDiagnostic = new Button
+            {
+                Text = "📦 一键诊断包（日志+配置+数据库+截图）",
+                Dock = DockStyle.Fill,
+                FlatStyle = FlatStyle.Flat,
+                BackColor = Color.Orange,
+                ForeColor = Color.White,
+                Font = new Font("Segoe UI", 9F, FontStyle.Bold),
+                Margin = new Padding(3)
+            };
 
             toolsTable.Controls.Add(btnDumpBlackBox, 0, 0);
             toolsTable.Controls.Add(btnClearLogs, 1, 0);
             toolsTable.Controls.Add(btnDiagnostics, 2, 0);
+            toolsTable.Controls.Add(btnOpenFrameMonitor, 3, 0);
+            toolsTable.Controls.Add(btnExportDiagnostic, 0, 1);
+            toolsTable.SetColumnSpan(btnExportDiagnostic, 4);
 
             grpTools.Controls.Add(toolsTable);
             mainTable.Controls.Add(grpTools, 0, mainTable.RowCount);
+            mainTable.RowCount++;
+
+            // ================================================================
+            // 4. 日志级别
+            // ================================================================
+            var grpLogLevel = new GroupBox
+            {
+                Text = "📋 日志级别",
+                Font = new Font("Segoe UI", 9F, FontStyle.Bold),
+                Padding = new Padding(10),
+                Dock = DockStyle.Fill,
+                AutoSize = true,
+                MinimumSize = new Size(400, 55)
+            };
+            var logLevelTable = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 3,
+                RowCount = 1,
+                AutoSize = true,
+                Padding = new Padding(5)
+            };
+            logLevelTable.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 40F));
+            logLevelTable.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 35F));
+            logLevelTable.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 25F));
+
+            lblCurrentLogLevel = new Label
+            {
+                Text = $"当前级别: {AppLogger.GlobalLogLevel}",
+                Font = new Font("Segoe UI", 10F),
+                ForeColor = Color.DarkBlue,
+                Dock = DockStyle.Fill,
+                TextAlign = ContentAlignment.MiddleLeft,
+                Margin = new Padding(3)
+            };
+
+            cmbLogLevel = new ComboBox
+            {
+                Dock = DockStyle.Fill,
+                DropDownStyle = ComboBoxStyle.DropDownList,
+                Margin = new Padding(3)
+            };
+            cmbLogLevel.Items.AddRange(new object[]
+            {
+                "Trace", "Debug", "Info", "Warn", "Error", "Fatal"
+            });
+            cmbLogLevel.SelectedItem = AppLogger.GlobalLogLevel.ToString();
+
+            btnApplyLogLevel = new Button
+            {
+                Text = "✅ 应用级别",
+                Dock = DockStyle.Fill,
+                FlatStyle = FlatStyle.Flat,
+                BackColor = Color.LightGreen,
+                Font = new Font("Segoe UI", 9F, FontStyle.Bold),
+                Margin = new Padding(3)
+            };
+
+            logLevelTable.Controls.Add(lblCurrentLogLevel, 0, 0);
+            logLevelTable.Controls.Add(cmbLogLevel, 1, 0);
+            logLevelTable.Controls.Add(btnApplyLogLevel, 2, 0);
+
+            grpLogLevel.Controls.Add(logLevelTable);
+            mainTable.Controls.Add(grpLogLevel, 0, mainTable.RowCount);
             mainTable.RowCount++;
 
             panel.Controls.Add(mainTable);

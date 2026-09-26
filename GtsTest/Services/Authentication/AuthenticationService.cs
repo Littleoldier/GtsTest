@@ -8,11 +8,11 @@ namespace GtsTest.Services.Authentication
 {
     public class AuthenticationService : IAuthenticationService
     {
-        private readonly IDataRepository _repo;
+        private readonly IUserRepository _repo;   // 🆕 从 IDataRepository 改为 IUserRepository
         private const int MaxFailedAttempts = 5;
         private readonly TimeSpan LockoutDuration = TimeSpan.FromMinutes(15);
 
-        public AuthenticationService(IDataRepository repo)
+        public AuthenticationService(IUserRepository repo)
         {
             _repo = repo ?? throw new ArgumentNullException(nameof(repo));
         }
@@ -67,7 +67,7 @@ namespace GtsTest.Services.Authentication
                 }
             }
 
-            // 首先尝试新格式 PBKDF2 验证
+            // 优先尝试新格式 PBKDF2
             if (AuthenticationHelper.VerifyPassword(password, user.PasswordHash, out bool needsRehash))
             {
                 if (needsRehash)
@@ -209,24 +209,20 @@ namespace GtsTest.Services.Authentication
             catch { }
         }
 
-        // ★★★ 修复：不区分大小写比较角色 ★★★
+        // ★★★ 权限判断：不区分大小写比较角色 ★★★
         public bool HasPermission(User user, string permissionCode)
         {
             if (user == null) return false;
 
-            // 管理员拥有所有权限（不区分大小写）
             if (string.Equals(user.Role, "Admin", StringComparison.OrdinalIgnoreCase)) return true;
 
-            // 工程师权限（不区分大小写）
             if (string.Equals(user.Role, "Engineer", StringComparison.OrdinalIgnoreCase))
             {
-                // 工程师拥有除用户管理外的所有配置权限
                 if (permissionCode == PermissionCodes.UserManage) return false;
                 if (permissionCode == PermissionCodes.AuditView) return false;
                 return true;
             }
 
-            // 操作员权限（不区分大小写）
             if (string.Equals(user.Role, "Operator", StringComparison.OrdinalIgnoreCase))
             {
                 return permissionCode switch

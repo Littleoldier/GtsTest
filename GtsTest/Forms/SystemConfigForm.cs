@@ -1,14 +1,16 @@
 ﻿using GtsTest.Controls;
 using GtsTest.Core;
+using GtsTest.Diagnostics;
 using GtsTest.Forms;
 using GtsTest.Models;
 using GtsTest.Presenters;
 using GtsTest.Services;
 using GtsTest.Services.Authentication;
 using GtsTest.Services.Data;
-using GtsTest.Services.Mes;
+using GtsTest.Services.Plc;
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Drawing;
 using System.IO;
 using System.Linq;
@@ -24,8 +26,9 @@ namespace GtsTest
         private readonly IDataRepository _repo;
         private readonly IAuthenticationService _authService;
         private readonly User _currentUser;
+        private readonly PlcManager _plcManager;
 
-        // 子控件
+        // ---- 子控件 ----
         private WorkflowControl workflowControl;
         private CommunicationControl commControl;
         private MqttControl mqttControl;
@@ -33,42 +36,39 @@ namespace GtsTest
         private Panel debugPanel;
         private DebugToolboxForm debugControl;
 
-        // ⭐ 日志级别 UI 控件（动态创建）
-        private Label? _lblCurrentLogLevel;
-        private ComboBox? _cmbLogLevel;
-
-        // 用户管理控件
+        // ---- 用户管理控件 ----
         private ListView listViewUsers;
         private Button btnAddUser;
         private Button btnEditUser;
         private Button btnDeleteUser;
         private Button btnResetPassword;
-        private Label lblUserStatus;
         private Button btnToggleStatus;
         private CheckBox chkShowDeleted;
+        private Label lblUserStatus;
 
+        // ================================================================
+        // 构造函数
+        // ================================================================
         public SystemConfigForm(
             DeviceManager deviceManager,
             GtsModel model,
             IDataRepository repo,
             IAuthenticationService authService,
-            User currentUser)
+            User currentUser,
+            PlcManager plcManager)
         {
             _deviceManager = deviceManager;
             _model = model;
             _repo = repo;
             _authService = authService;
             _currentUser = currentUser;
+            _plcManager = plcManager;
 
             InitializeComponent();
 
             BindEvents();
             ApplyPermissions();
             LoadControls();
-
-            // ⭐ 动态添加日志级别面板（必须在 ApplyPermissions 之后，因为 Tab 页会被重建）
-            AddLogLevelPanel();
-
             LoadUserManagement();
 
             this.Text = $"🔧 系统配置中心 - {currentUser?.FullName ?? "工程师"}";
@@ -79,8 +79,12 @@ namespace GtsTest
             AppLogger.Info($"SystemConfigForm 初始化: 用户={currentUser?.Username}, 角色={currentUser?.Role}", "SystemConfig");
         }
 
+        // ================================================================
+        // 事件绑定
+        // ================================================================
         private void BindEvents()
         {
+            // ---- 系统工具 ----
             btnInit.Click += BtnInit_Click;
             btnToggleMode.Click += BtnToggleMode_Click;
             btnHotReload.Click += BtnHotReload_Click;
@@ -88,126 +92,11 @@ namespace GtsTest
             btnDumpBlackBox.Click += BtnDumpBlackBox_Click;
             btnClearLogs.Click += BtnClearLogs_Click;
             btnDiagnostics.Click += BtnDiagnostics_Click;
-        }
+            btnExportDiagnostic.Click += BtnExportDiagnostic_Click;
+            btnOpenFrameMonitor.Click += BtnOpenFrameMonitor_Click;
 
-        // ================================================================
-        // ⭐ 动态添加"日志级别"面板
-        // ================================================================
-        private void AddLogLevelPanel()
-        {
-            try
-            {
-                // 1. 找到 tabSystemTools 里的主 TableLayoutPanel
-                TableLayoutPanel? mainTable = null;
-                foreach (Control ctrl in tabSystemTools.Controls)
-                {
-                    if (ctrl is Panel panel)
-                    {
-                        foreach (Control inner in panel.Controls)
-                        {
-                            if (inner is TableLayoutPanel t)
-                            {
-                                mainTable = t;
-                                break;
-                            }
-                        }
-                    }
-                    if (mainTable != null) break;
-                }
-
-                if (mainTable == null)
-                {
-                    AppLogger.Warn("未找到系统工具主布局，跳过日志级别面板添加", "SystemConfig");
-                    return;
-                }
-
-                // 2. 构造 GroupBox
-                var grpLogLevel = new GroupBox
-                {
-                    Text = "📝 日志级别",
-                    Font = new Font("Segoe UI", 9F, FontStyle.Bold),
-                    Padding = new Padding(10),
-                    Dock = DockStyle.Fill,
-                    AutoSize = true,
-                    MinimumSize = new Size(400, 55)
-                };
-
-                var logLevelTable = new TableLayoutPanel
-                {
-                    Dock = DockStyle.Fill,
-                    ColumnCount = 3,
-                    RowCount = 1,
-                    AutoSize = true,
-                    Padding = new Padding(5)
-                };
-                logLevelTable.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 40F));
-                logLevelTable.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 30F));
-                logLevelTable.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 30F));
-
-                // 当前级别显示
-                _lblCurrentLogLevel = new Label
-                {
-                    Text = $"当前级别: {GtsTest.Data.LoggingConfig.GetCurrentLevelName()}",
-                    Font = new Font("Segoe UI", 10F),
-                    ForeColor = Color.DarkBlue,
-                    Dock = DockStyle.Fill,
-                    TextAlign = ContentAlignment.MiddleLeft,
-                    Margin = new Padding(3)
-                };
-
-                // 级别下拉框
-                _cmbLogLevel = new ComboBox
-                {
-                    Dock = DockStyle.Fill,
-                    DropDownStyle = ComboBoxStyle.DropDownList,
-                    Margin = new Padding(3)
-                };
-                _cmbLogLevel.Items.AddRange(new object[] { "Trace", "Debug", "Info", "Warn", "Error", "Fatal" });
-                _cmbLogLevel.SelectedItem = GtsTest.Data.LoggingConfig.GetCurrentLevelName();
-
-                // 应用按钮
-                var btnApplyLevel = new Button
-                {
-                    Text = "应用级别",
-                    Dock = DockStyle.Fill,
-                    FlatStyle = FlatStyle.Flat,
-                    BackColor = Color.LightGreen,
-                    Margin = new Padding(3)
-                };
-                btnApplyLevel.Click += (s, e) =>
-                {
-                    string selected = _cmbLogLevel.SelectedItem?.ToString() ?? "Info";
-                    if (GtsTest.Data.LoggingConfig.SetLevel(selected))
-                    {
-                        if (_lblCurrentLogLevel != null)
-                            _lblCurrentLogLevel.Text = $"当前级别: {selected}";
-                        AppLogger.Info($"🔄 日志级别已切换为: {selected}", "SystemConfig");
-                        MessageBox.Show($"日志级别已切换为: {selected}", "提示",
-                            MessageBoxButtons.OK, MessageBoxIcon.Information);
-                    }
-                    else
-                    {
-                        MessageBox.Show($"无效的日志级别: {selected}", "错误",
-                            MessageBoxButtons.OK, MessageBoxIcon.Error);
-                    }
-                };
-
-                logLevelTable.Controls.Add(_lblCurrentLogLevel, 0, 0);
-                logLevelTable.Controls.Add(_cmbLogLevel, 1, 0);
-                logLevelTable.Controls.Add(btnApplyLevel, 2, 0);
-
-                grpLogLevel.Controls.Add(logLevelTable);
-
-                // 3. 追加到 mainTable 末尾
-                mainTable.Controls.Add(grpLogLevel, 0, mainTable.RowCount);
-                mainTable.RowCount++;
-
-                AppLogger.Info("✅ 日志级别面板已添加", "SystemConfig");
-            }
-            catch (Exception ex)
-            {
-                AppLogger.Error($"添加日志级别面板失败: {ex.Message}", "SystemConfig");
-            }
+            // ---- 日志级别 ----
+            btnApplyLogLevel.Click += BtnApplyLogLevel_Click;
         }
 
         // ================================================================
@@ -279,7 +168,7 @@ namespace GtsTest
                 });
             }
 
-            // ---- 4. 调试工具 ----
+            // ---- 4. 调试工具箱 ----
             try
             {
                 debugPanel = new Panel { Dock = DockStyle.Fill, Padding = new Padding(6) };
@@ -288,7 +177,8 @@ namespace GtsTest
                     _model,
                     _deviceManager.AlarmManager,
                     _repo,
-                    _authService);
+                    _authService,
+                    _plcManager);
                 debugControl.TopLevel = false;
                 debugControl.FormBorderStyle = FormBorderStyle.None;
                 debugControl.Dock = DockStyle.Fill;
@@ -317,6 +207,7 @@ namespace GtsTest
         {
             var panel = new Panel { Dock = DockStyle.Fill, Padding = new Padding(10) };
 
+            // ---- 顶部按钮条 ----
             var btnPanel = new FlowLayoutPanel
             {
                 Dock = DockStyle.Top,
@@ -354,6 +245,7 @@ namespace GtsTest
             chkShowDeleted.CheckedChanged += (s, e) => RefreshUserList();
             btnPanel.Controls.Add(chkShowDeleted);
 
+            // ---- 底部状态栏 ----
             lblUserStatus = new Label
             {
                 Dock = DockStyle.Bottom,
@@ -363,6 +255,7 @@ namespace GtsTest
                 Font = new Font("Segoe UI", 9F)
             };
 
+            // ---- 中间列表 ----
             listViewUsers = new ListView
             {
                 Dock = DockStyle.Fill,
@@ -412,6 +305,7 @@ namespace GtsTest
                     btnToggleStatus.Enabled = false;
                 }
             };
+
             panel.Controls.Add(listViewUsers);
             panel.Controls.Add(lblUserStatus);
             panel.Controls.Add(btnPanel);
@@ -465,7 +359,10 @@ namespace GtsTest
             }
         }
 
-        private void BtnAddUser_Click(object sender, EventArgs e)
+        // ================================================================
+        // 用户管理事件
+        // ================================================================
+        private void BtnAddUser_Click(object? sender, EventArgs e)
         {
             using (var dialog = new UserDialog())
             {
@@ -491,7 +388,7 @@ namespace GtsTest
             }
         }
 
-        private void BtnEditUser_Click(object sender, EventArgs e)
+        private void BtnEditUser_Click(object? sender, EventArgs e)
         {
             if (listViewUsers.SelectedItems.Count == 0) return;
             var user = listViewUsers.SelectedItems[0].Tag as User;
@@ -519,7 +416,7 @@ namespace GtsTest
             }
         }
 
-        private void BtnDeleteUser_Click(object sender, EventArgs e)
+        private void BtnDeleteUser_Click(object? sender, EventArgs e)
         {
             if (listViewUsers.SelectedItems.Count == 0) return;
             var user = listViewUsers.SelectedItems[0].Tag as User;
@@ -553,7 +450,7 @@ namespace GtsTest
             }
         }
 
-        private void BtnResetPassword_Click(object sender, EventArgs e)
+        private void BtnResetPassword_Click(object? sender, EventArgs e)
         {
             if (listViewUsers.SelectedItems.Count == 0) return;
             var user = listViewUsers.SelectedItems[0].Tag as User;
@@ -580,14 +477,7 @@ namespace GtsTest
                             RefreshUserList();
                             MessageBox.Show($"用户 {user.Username} 的密码已重置成功", "提示", MessageBoxButtons.OK, MessageBoxIcon.Information);
                             AppLogger.Info($"管理员 {_currentUser.Username} 重置了用户 {user.Username} 的密码", "SystemConfig");
-
-                            AuditService.Log(
-                                _currentUser?.Id ?? 0,
-                                _currentUser?.Username ?? "系统",
-                                "ResetPassword",
-                                $"管理员重置了用户 {user.Username} 的密码",
-                                _repo
-                            );
+                            AuditService.Log(_currentUser?.Id ?? 0, _currentUser?.Username ?? "系统", "ResetPassword", $"管理员重置了用户 {user.Username} 的密码", _repo);
                         }
                         else
                         {
@@ -603,8 +493,32 @@ namespace GtsTest
             }
         }
 
+        private void BtnToggleStatus_Click(object? sender, EventArgs e)
+        {
+            if (listViewUsers.SelectedItems.Count == 0) return;
+            var user = listViewUsers.SelectedItems[0].Tag as User;
+            if (user == null) return;
+
+            string action = user.IsActive == 1 ? "禁用" : "启用";
+            if (MessageBox.Show($"确定要{action}用户 {user.Username} 吗？", $"确认{action}", MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes)
+            {
+                user.IsActive = user.IsActive == 1 ? 0 : 1;
+                if (_repo.UpdateUser(user))
+                {
+                    RefreshUserList();
+                    MessageBox.Show($"用户 {user.Username} 已{action}", "提示", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    AppLogger.Info($"管理员 {_currentUser.Username} {action}了用户 {user.Username}", "SystemConfig");
+                    AuditService.Log(_currentUser?.Id ?? 0, _currentUser?.Username ?? "系统", "ToggleUserStatus", $"{action}用户 {user.Username}", _repo);
+                }
+                else
+                {
+                    MessageBox.Show("操作失败，请重试", "错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+            }
+        }
+
         // ================================================================
-        // 权限控制
+        // 权限
         // ================================================================
         private void ApplyPermissions()
         {
@@ -650,34 +564,10 @@ namespace GtsTest
             tabMain.SelectedIndex = 0;
         }
 
-        private void BtnToggleStatus_Click(object sender, EventArgs e)
-        {
-            if (listViewUsers.SelectedItems.Count == 0) return;
-            var user = listViewUsers.SelectedItems[0].Tag as User;
-            if (user == null) return;
-
-            string action = user.IsActive == 1 ? "禁用" : "启用";
-            if (MessageBox.Show($"确定要{action}用户 {user.Username} 吗？", $"确认{action}", MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes)
-            {
-                user.IsActive = user.IsActive == 1 ? 0 : 1;
-                if (_repo.UpdateUser(user))
-                {
-                    RefreshUserList();
-                    MessageBox.Show($"用户 {user.Username} 已{action}", "提示", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                    AppLogger.Info($"管理员 {_currentUser.Username} {action}了用户 {user.Username}", "SystemConfig");
-                    AuditService.Log(_currentUser?.Id ?? 0, _currentUser?.Username ?? "系统", "ToggleUserStatus", $"{action}用户 {user.Username}", _repo);
-                }
-                else
-                {
-                    MessageBox.Show("操作失败，请重试", "错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                }
-            }
-        }
-
         // ================================================================
-        // 系统工具
+        // 系统工具事件
         // ================================================================
-        private void BtnInit_Click(object sender, EventArgs e)
+        private void BtnInit_Click(object? sender, EventArgs e)
         {
             try
             {
@@ -698,7 +588,7 @@ namespace GtsTest
             }
         }
 
-        private void BtnToggleMode_Click(object sender, EventArgs e)
+        private void BtnToggleMode_Click(object? sender, EventArgs e)
         {
             bool isSim = GtsModel.UseSimulation;
             try
@@ -733,6 +623,7 @@ namespace GtsTest
             }
         }
 
+        /// <summary>刷新"当前模式"标签（动态查找）</summary>
         private void UpdateModeStatusLabel()
         {
             foreach (Control ctrl in tabSystemTools.Controls)
@@ -770,193 +661,236 @@ namespace GtsTest
         }
 
         // ================================================================
-        // ⭐ 热重载配置（设备 + 日志 + MES + 数据库检测）
+        // 🔄 热加载配置（带详细 diff 报告）
         // ================================================================
-        private void BtnHotReload_Click(object sender, EventArgs e)
+        private void BtnHotReload_Click(object? sender, EventArgs e)
         {
-            if (MessageBox.Show(
-                "确定要热重载所有配置吗？\n\n" +
-                "• 设备配置 (devices.json) → 立即生效\n" +
-                "• 日志配置 (appsettings.json → Logging) → 立即生效\n" +
-                "• MES 配置 (mes_config.json) → 立即生效\n" +
-                "• 数据库配置 (appsettings.json → Database) → 需重启程序生效",
-                "热重载配置", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
+            string path = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "devices.json");
+            if (!File.Exists(path))
             {
+                MessageBox.Show($"配置文件不存在:\n{path}", "错误", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
 
-            btnHotReload.Enabled = false;
-            btnHotReload.Text = "⏳ 重载中...";
-
-            var sb = new StringBuilder();
-            int successCount = 0;
-            int failCount = 0;
-
+            // ---- 1. 读取并解析 JSON ----
+            List<DeviceConfig>? newConfigs;
             try
             {
-                // 1. 设备配置
-                try
+                string json = File.ReadAllText(path);
+                newConfigs = System.Text.Json.JsonSerializer.Deserialize<List<DeviceConfig>>(json);
+                if (newConfigs == null)
                 {
-                    string devicesPath = Path.Combine(
-                        AppDomain.CurrentDomain.BaseDirectory, "devices.json");
-
-                    if (!File.Exists(devicesPath))
-                    {
-                        sb.AppendLine("⚠️ 设备配置: devices.json 不存在，跳过");
-                    }
-                    else
-                    {
-                        string json = File.ReadAllText(devicesPath);
-                        if (_deviceManager.ImportConfig(json))
-                        {
-                            int deviceCount = _deviceManager.GetAllDevices().Count;
-                            sb.AppendLine($"✅ 设备配置: 已重载 {deviceCount} 台设备");
-                            AppLogger.Info($"设备配置热重载成功: {devicesPath}", "SystemConfig");
-                            successCount++;
-                        }
-                        else
-                        {
-                            sb.AppendLine("❌ 设备配置: 加载失败");
-                            AppLogger.Error($"设备配置热重载失败: {devicesPath}", "SystemConfig");
-                            failCount++;
-                        }
-                    }
+                    MessageBox.Show("配置文件解析失败：内容为空", "错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    return;
                 }
-                catch (Exception ex)
-                {
-                    sb.AppendLine($"❌ 设备配置: 异常 - {ex.Message}");
-                    AppLogger.Error($"设备配置热重载异常: {ex.Message}", "SystemConfig");
-                    failCount++;
-                }
-
-                // 2. 日志配置
-                try
-                {
-                    var oldLevel = AppLogger.GlobalLogLevel;
-                    var logCfg = GtsTest.Data.LoggingConfig.Load();
-
-                    if (Enum.TryParse<LogLevel>(logCfg.Level, true, out var newLevel))
-                    {
-                        if (newLevel != oldLevel)
-                        {
-                            AppLogger.GlobalLogLevel = newLevel;
-                            AppLogger.MaxFileSizeMB = logCfg.MaxFileSizeMB;
-                            AppLogger.RetentionDays = logCfg.RetentionDays;
-
-                            sb.AppendLine($"✅ 日志配置: 级别 {oldLevel} → {newLevel}");
-                            AppLogger.Info($"日志级别动态切换: {oldLevel} → {newLevel}", "SystemConfig");
-                            successCount++;
-
-                            // ⭐ 更新 UI 显示
-                            if (_lblCurrentLogLevel != null)
-                                _lblCurrentLogLevel.Text = $"当前级别: {newLevel}";
-                            if (_cmbLogLevel != null)
-                                _cmbLogLevel.SelectedItem = newLevel.ToString();
-                        }
-                        else
-                        {
-                            sb.AppendLine($"ℹ️ 日志配置: 级别无变化 ({oldLevel})");
-                        }
-                    }
-                    else
-                    {
-                        sb.AppendLine($"⚠️ 日志配置: 无效级别 '{logCfg.Level}'，跳过");
-                    }
-                }
-                catch (Exception ex)
-                {
-                    sb.AppendLine($"❌ 日志配置: 异常 - {ex.Message}");
-                    AppLogger.Error($"日志配置重载异常: {ex.Message}", "SystemConfig");
-                    failCount++;
-                }
-
-                // 3. MES 配置
-                try
-                {
-                    var mesService = _deviceManager.MesService;
-                    if (mesService == null)
-                    {
-                        sb.AppendLine("⚠️ MES 配置: MES 服务未初始化，跳过");
-                    }
-                    else
-                    {
-                        var newMesConfig = MesConfig.Load();
-                        mesService.ReloadConfig(newMesConfig);
-
-                        string mesUrl = newMesConfig.Protocol.Equals("SOAP", StringComparison.OrdinalIgnoreCase)
-                            ? newMesConfig.SoapEndpoint
-                            : newMesConfig.ApiUrl;
-
-                        sb.AppendLine($"✅ MES 配置: 已重载");
-                        sb.AppendLine($"     Protocol: {newMesConfig.Protocol}");
-                        sb.AppendLine($"     URL: {mesUrl}");
-                        sb.AppendLine($"     Enabled: {(newMesConfig.Enabled ? "是" : "否")}");
-
-                        AppLogger.Info($"MES 配置热重载成功: Protocol={newMesConfig.Protocol}, URL={mesUrl}", "SystemConfig");
-                        AuditService.Log(_currentUser?.Id ?? 0, _currentUser?.Username ?? "系统",
-                            "HotReloadMES", $"重载 MES 配置: Protocol={newMesConfig.Protocol}", _repo);
-                        successCount++;
-                    }
-                }
-                catch (Exception ex)
-                {
-                    sb.AppendLine($"❌ MES 配置: 异常 - {ex.Message}");
-                    AppLogger.Error($"MES 配置热重载异常: {ex.Message}", "SystemConfig");
-                    failCount++;
-                }
-
-                // 4. 数据库配置检测
-                try
-                {
-                    var oldProvider = GtsTest.Data.DbContextFactory.CurrentProvider;
-                    var oldConnStr = GtsTest.Data.DbContextFactory.CurrentConnectionString;
-
-                    GtsTest.Data.DbContextFactory.ConfigureFromAppSettings();
-
-                    var newProvider = GtsTest.Data.DbContextFactory.CurrentProvider;
-                    var newConnStr = GtsTest.Data.DbContextFactory.CurrentConnectionString;
-
-                    if (oldProvider != newProvider || oldConnStr != newConnStr)
-                    {
-                        sb.AppendLine($"⚠️ 数据库配置: 已检测到变更");
-                        sb.AppendLine($"     Provider: {oldProvider} → {newProvider}");
-                        sb.AppendLine($"     ⚠️ 需重启程序才能生效！");
-                        AppLogger.Warn($"数据库配置已变更，需重启程序: {oldProvider} → {newProvider}", "SystemConfig");
-                    }
-                    else
-                    {
-                        sb.AppendLine("ℹ️ 数据库配置: 无变化");
-                    }
-                }
-                catch (Exception ex)
-                {
-                    sb.AppendLine($"⚠️ 数据库配置: 检查异常 - {ex.Message}");
-                }
-
-                sb.AppendLine();
-                sb.AppendLine($"========== 汇总 ==========");
-                sb.AppendLine($"成功: {successCount} 项，失败: {failCount} 项");
-
-                string message = sb.ToString();
-                var icon = failCount > 0 ? MessageBoxIcon.Warning : MessageBoxIcon.Information;
-
-                MessageBox.Show(message, "热重载结果", MessageBoxButtons.OK, icon);
-                AppLogger.Info($"热重载完成: 成功 {successCount}, 失败 {failCount}", "SystemConfig");
             }
             catch (Exception ex)
             {
-                MessageBox.Show($"热重载失败: {ex.Message}", "错误",
-                    MessageBoxButtons.OK, MessageBoxIcon.Error);
-                AppLogger.Error($"热重载整体失败: {ex.Message}", "SystemConfig");
+                MessageBox.Show($"配置文件解析失败:\n{ex.Message}", "错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                AppLogger.Error($"热加载解析失败: {ex.Message}", "SystemConfig");
+                return;
             }
-            finally
+
+            // ---- 2. 与内存中的设备做 Diff ----
+            var currentRuntimes = _deviceManager.GetAllDevices();
+            var currentDict = currentRuntimes.ToDictionary(d => d.Config.DeviceId, d => d.Config);
+
+            var added = new List<DeviceConfig>();
+            var removed = new List<DeviceConfig>();
+            var modified = new List<(DeviceConfig Old, DeviceConfig New, List<string> Changes)>();
+            var unchanged = new List<DeviceConfig>();
+
+            // 遍历新配置：识别新增 / 修改 / 未变
+            var newIds = new HashSet<string>();
+            foreach (var newCfg in newConfigs)
             {
-                btnHotReload.Enabled = true;
-                btnHotReload.Text = "🌡️ 热加载配置";
+                if (string.IsNullOrEmpty(newCfg.DeviceId)) continue;
+                newIds.Add(newCfg.DeviceId);
+
+                if (!currentDict.TryGetValue(newCfg.DeviceId, out var oldCfg))
+                {
+                    added.Add(newCfg);
+                }
+                else
+                {
+                    var changes = DiffDeviceConfig(oldCfg, newCfg);
+                    if (changes.Count > 0)
+                        modified.Add((oldCfg, newCfg, changes));
+                    else
+                        unchanged.Add(newCfg);
+                }
+            }
+
+            // 遍历当前内存：识别移除
+            foreach (var oldCfg in currentDict.Values)
+            {
+                if (!newIds.Contains(oldCfg.DeviceId))
+                    removed.Add(oldCfg);
+            }
+
+            // ---- 3. 生成变更报告 ----
+            int totalChanges = added.Count + removed.Count + modified.Count;
+
+            var sb = new StringBuilder();
+            sb.AppendLine($"📄 配置文件: {Path.GetFileName(path)}");
+            sb.AppendLine($"🕐 修改时间: {File.GetLastWriteTime(path):yyyy-MM-dd HH:mm:ss}");
+            sb.AppendLine(new string('─', 62));
+            sb.AppendLine();
+
+            if (totalChanges == 0)
+            {
+                sb.AppendLine("✅ 配置文件与当前运行状态完全一致，无需更新");
+                sb.AppendLine();
+                sb.AppendLine($"设备总数: {newConfigs.Count}（全部未变化）");
+                MessageBox.Show(sb.ToString(), "热加载 - 无变化", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                AppLogger.Info("热加载检查: 配置文件与当前状态一致，无变更", "SystemConfig");
+                return;
+            }
+
+            sb.AppendLine($"📊 变更总览: 新增 {added.Count} 台 / 移除 {removed.Count} 台 / 修改 {modified.Count} 台 / 未变 {unchanged.Count} 台");
+            sb.AppendLine();
+
+            // ---- 新增 ----
+            if (added.Count > 0)
+            {
+                sb.AppendLine($"【➕ 新增 {added.Count} 台】");
+                foreach (var cfg in added)
+                    sb.AppendLine($"   • {cfg.Name} ({cfg.DeviceId})  →  {cfg.Modbus?.IpAddress}:{cfg.Modbus?.Port}, 轴={cfg.Axis}");
+                sb.AppendLine();
+            }
+
+            // ---- 移除 ----
+            if (removed.Count > 0)
+            {
+                sb.AppendLine($"【➖ 移除 {removed.Count} 台】");
+                foreach (var cfg in removed)
+                    sb.AppendLine($"   • {cfg.Name} ({cfg.DeviceId})  ⚠️ 当前产量: {cfg.CurrentCount}/{cfg.TargetCount}");
+                sb.AppendLine();
+            }
+
+            // ---- 修改 ----
+            if (modified.Count > 0)
+            {
+                sb.AppendLine($"【✏️ 修改 {modified.Count} 台】");
+                foreach (var (oldCfg, newCfg, changes) in modified)
+                {
+                    sb.AppendLine($"   • {newCfg.Name} ({newCfg.DeviceId})");
+                    foreach (var c in changes)
+                        sb.AppendLine($"        {c}");
+                }
+                sb.AppendLine();
+            }
+
+            // ---- 未变 ----
+            if (unchanged.Count > 0)
+            {
+                sb.AppendLine($"【✔ 未变化 {unchanged.Count} 台】");
+                foreach (var cfg in unchanged)
+                    sb.AppendLine($"   • {cfg.Name} ({cfg.DeviceId})");
+                sb.AppendLine();
+            }
+
+            // ---- 4. 用户确认 ----
+            sb.AppendLine(new string('─', 62));
+            sb.AppendLine("⚠️ 注意：");
+            sb.AppendLine("   • 正在运行的设备需先停止才能应用新配置");
+            sb.AppendLine("   • 当前产量会被保留，不会被 JSON 覆盖");
+            sb.AppendLine();
+            sb.AppendLine("是否应用这些变更？");
+
+            var result = MessageBox.Show(sb.ToString(), "热加载 - 变更预览",
+                MessageBoxButtons.OKCancel, MessageBoxIcon.Question);
+
+            if (result != DialogResult.OK)
+            {
+                AppLogger.Info("用户取消了热加载", "SystemConfig");
+                return;
+            }
+
+            // ---- 5. 应用变更（保留当前产量）----
+            try
+            {
+                // 快照当前产量
+                var productionSnapshot = currentRuntimes
+                    .ToDictionary(d => d.Config.DeviceId, d => d.Config.CurrentCount);
+
+                if (_deviceManager.ImportConfig(File.ReadAllText(path)))
+                {
+                    // 恢复产量
+                    foreach (var dev in _deviceManager.GetAllDevices())
+                    {
+                        if (productionSnapshot.TryGetValue(dev.Config.DeviceId, out int savedCount))
+                            dev.Config.CurrentCount = savedCount;
+                    }
+
+                    AppLogger.Info($"✅ 热加载成功: +{added.Count} / -{removed.Count} / ~{modified.Count}", "SystemConfig");
+                    AuditService.Log(
+                        _currentUser?.Id ?? 0,
+                        _currentUser?.Username ?? "系统",
+                        "HotReload",
+                        $"热加载 devices.json: 新增{added.Count}/移除{removed.Count}/修改{modified.Count}",
+                        _repo);
+
+                    MessageBox.Show(
+                        $"✅ 配置已应用\n\n➕ 新增 {added.Count} 台\n➖ 移除 {removed.Count} 台\n✏️ 修改 {modified.Count} 台",
+                        "热加载成功", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                }
+                else
+                {
+                    MessageBox.Show("配置应用失败，请查看日志", "错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"应用配置异常: {ex.Message}", "错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                AppLogger.Error($"热加载异常: {ex.Message}", "SystemConfig");
             }
         }
 
-        private void BtnSaveConfig_Click(object sender, EventArgs e)
+        /// <summary>
+        /// 对比两个 DeviceConfig，返回人类可读的差异列表（空列表 = 完全一致）
+        /// </summary>
+        private List<string> DiffDeviceConfig(DeviceConfig oldCfg, DeviceConfig newCfg)
+        {
+            var diffs = new List<string>();
+
+            void Check<T>(string label, T oldVal, T newVal)
+            {
+                if (!EqualityComparer<T>.Default.Equals(oldVal, newVal))
+                    diffs.Add($"{label}: {oldVal} → {newVal}");
+            }
+
+            // 顶层字段
+            Check("名称", oldCfg.Name, newCfg.Name);
+            Check("启用状态", oldCfg.Enabled, newCfg.Enabled);
+            Check("轴号", oldCfg.Axis, newCfg.Axis);
+            Check("目标产量", oldCfg.TargetCount, newCfg.TargetCount);
+            Check("信号起始地址", oldCfg.SignalStartAddress, newCfg.SignalStartAddress);
+            Check("工位位置", oldCfg.WorkPosition, newCfg.WorkPosition);
+            Check("回零位置", oldCfg.HomePosition, newCfg.HomePosition);
+            Check("移动速度", oldCfg.MoveSpeed, newCfg.MoveSpeed);
+            Check("移动加速度", oldCfg.MoveAcc, newCfg.MoveAcc);
+            Check("循环延时(ms)", oldCfg.CycleDelayMs, newCfg.CycleDelayMs);
+
+            // Modbus 子配置
+            if (oldCfg.Modbus != null && newCfg.Modbus != null)
+            {
+                Check("Modbus协议", oldCfg.Modbus.Protocol, newCfg.Modbus.Protocol);
+                Check("Modbus IP", oldCfg.Modbus.IpAddress, newCfg.Modbus.IpAddress);
+                Check("Modbus端口", oldCfg.Modbus.Port, newCfg.Modbus.Port);
+                Check("从站地址", oldCfg.Modbus.SlaveAddress, newCfg.Modbus.SlaveAddress);
+                Check("起始地址", oldCfg.Modbus.StartAddress, newCfg.Modbus.StartAddress);
+                Check("寄存器数量", oldCfg.Modbus.RegisterCount, newCfg.Modbus.RegisterCount);
+            }
+            else if ((oldCfg.Modbus == null) != (newCfg.Modbus == null))
+            {
+                diffs.Add($"Modbus 配置: {(oldCfg.Modbus == null ? "无 → 有" : "有 → 无")}");
+            }
+
+            return diffs;
+        }
+
+        private void BtnSaveConfig_Click(object? sender, EventArgs e)
         {
             try
             {
@@ -973,7 +907,7 @@ namespace GtsTest
             }
         }
 
-        private void BtnDumpBlackBox_Click(object sender, EventArgs e)
+        private void BtnDumpBlackBox_Click(object? sender, EventArgs e)
         {
             try
             {
@@ -996,7 +930,7 @@ namespace GtsTest
             }
         }
 
-        private void BtnClearLogs_Click(object sender, EventArgs e)
+        private void BtnClearLogs_Click(object? sender, EventArgs e)
         {
             if (MessageBox.Show("确定要清空操作日志和监控日志吗？（不影响日志文件）", "确认", MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes)
             {
@@ -1009,34 +943,124 @@ namespace GtsTest
             }
         }
 
-        private void BtnDiagnostics_Click(object sender, EventArgs e)
+        private void BtnDiagnostics_Click(object? sender, EventArgs e)
         {
             var devices = _deviceManager.GetAllDevices();
-
-            var mesService = _deviceManager.MesService;
-            string mesInfo = mesService == null
-                ? "未初始化"
-                : $"{mesService.Protocol} | {(mesService.IsEnabled ? "启用" : "禁用")} | 待重传: {mesService.PendingCount}";
-
-            string dbInfo = $"Provider={GtsTest.Data.DbContextFactory.CurrentProvider}";
-            string logInfo = $"Level={AppLogger.GlobalLogLevel}";
-
-            string info = $"=== 系统诊断 ===\n";
-            info += $"设备总数: {devices.Count}\n";
+            string info = $"设备总数: {devices.Count}\n";
             info += $"在线设备: {devices.Count(d => d.IsOnline)}\n";
             info += $"总产量: {devices.Sum(d => d.Config.CurrentCount)}\n";
             info += $"模拟模式: {GtsModel.UseSimulation}\n";
-            info += $"\n=== MES 状态 ===\n";
-            info += $"{mesInfo}\n";
-            info += $"\n=== 数据库 ===\n";
-            info += $"{dbInfo}\n";
-            info += $"\n=== 日志 ===\n";
-            info += $"{logInfo}\n";
-            info += $"\n时间: {DateTime.Now}\n";
+            info += $"时间: {DateTime.Now}\n";
             info += $"用户: {_currentUser?.Username} ({_currentUser?.Role})";
-
             MessageBox.Show(info, "系统诊断", MessageBoxButtons.OK, MessageBoxIcon.Information);
             AppLogger.Info("执行了系统诊断", "SystemConfig");
+        }
+
+        private void BtnExportDiagnostic_Click(object? sender, EventArgs e)
+        {
+            try
+            {
+                this.Cursor = Cursors.WaitCursor;
+                btnExportDiagnostic.Enabled = false;
+
+                Form? mainForm = this.Owner as Form;
+                string? zipPath = DiagnosticPackageBuilder.Build(_deviceManager, mainForm);
+
+                this.Cursor = Cursors.Default;
+                btnExportDiagnostic.Enabled = true;
+
+                if (string.IsNullOrEmpty(zipPath))
+                {
+                    MessageBox.Show("诊断包导出失败，请查看日志文件", "错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    return;
+                }
+
+                AppLogger.Info($"诊断包已导出: {zipPath}", "Diagnostic");
+                AuditService.Log(
+                    _currentUser?.Id ?? 0,
+                    _currentUser?.Username ?? "系统",
+                    "ExportDiagnostic",
+                    $"导出诊断包: {Path.GetFileName(zipPath)}",
+                    _repo);
+
+                var result = MessageBox.Show(
+                    $"✅ 诊断包已导出：\n\n{zipPath}\n\n是否立即打开所在文件夹？",
+                    "导出成功",
+                    MessageBoxButtons.YesNo,
+                    MessageBoxIcon.Information);
+
+                if (result == DialogResult.Yes)
+                {
+                    try
+                    {
+                        Process.Start("explorer.exe", $"/select,\"{zipPath}\"");
+                    }
+                    catch (Exception ex)
+                    {
+                        AppLogger.Warn($"打开文件夹失败: {ex.Message}", "Diagnostic");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                this.Cursor = Cursors.Default;
+                btnExportDiagnostic.Enabled = true;
+                MessageBox.Show($"导出诊断包异常: {ex.Message}", "错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                AppLogger.Error($"导出诊断包异常: {ex}", "Diagnostic");
+            }
+        }
+
+        private void BtnOpenFrameMonitor_Click(object? sender, EventArgs e)
+        {
+            try
+            {
+                var form = new GtsTest.Diagnostics.FrameMonitorForm();
+                form.Show(this);
+                AppLogger.Info("打开报文监视器", "Diagnostic");
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"打开报文监视器失败: {ex.Message}", "错误",
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+                AppLogger.Error($"打开报文监视器失败: {ex}", "Diagnostic");
+            }
+        }
+
+        private void BtnApplyLogLevel_Click(object? sender, EventArgs e)
+        {
+            try
+            {
+                string? levelName = cmbLogLevel.SelectedItem?.ToString();
+                if (string.IsNullOrEmpty(levelName))
+                {
+                    MessageBox.Show("请选择日志级别", "提示", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+
+                if (!Enum.TryParse<LogLevel>(levelName, true, out var level))
+                {
+                    MessageBox.Show($"无效的日志级别: {levelName}", "错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    return;
+                }
+
+                AppLogger.GlobalLogLevel = level;
+                lblCurrentLogLevel.Text = $"当前级别: {level}";
+
+                AppLogger.Info($"🔄 日志级别已切换为: {level}", "SystemConfig");
+                AuditService.Log(
+                    _currentUser?.Id ?? 0,
+                    _currentUser?.Username ?? "系统",
+                    "SetLogLevel",
+                    $"设置日志级别为 {level}",
+                    _repo);
+
+                MessageBox.Show($"日志级别已切换为 {level}", "提示", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"应用日志级别异常: {ex.Message}", "错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                AppLogger.Error($"应用日志级别异常: {ex.Message}", "SystemConfig");
+            }
         }
 
         // ================================================================

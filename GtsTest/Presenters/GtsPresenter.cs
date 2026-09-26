@@ -6,6 +6,7 @@ using GtsTest.Services.Alarm;
 using GtsTest.Services.Authentication;
 using GtsTest.Services.Data;
 using GtsTest.Services.Logging;
+using GtsTest.Services.Plc; // 🆕 引入 PlcManager
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -24,10 +25,12 @@ namespace GtsTest.Presenters
         private readonly IDataRepository _repository;
         private readonly IAlarmManager _alarmManager;
         private readonly IAuthenticationService _authService;
+        private readonly PlcManager _plcManager; // 🆕 新增字段
 
         private string _selectedDeviceId = "";
         private CancellationTokenSource _workflowCts;
 
+        // 🆕 构造函数增加 PlcManager 参数
         public GtsPresenter(
             IGtsView view,
             GtsModel model,
@@ -35,7 +38,8 @@ namespace GtsTest.Presenters
             ILogger logger,
             IDataRepository repository,
             IAlarmManager alarmManager,
-            IAuthenticationService authService)
+            IAuthenticationService authService,
+            PlcManager plcManager)
         {
             _view = view ?? throw new ArgumentNullException(nameof(view));
             _model = model ?? throw new ArgumentNullException(nameof(model));
@@ -44,6 +48,7 @@ namespace GtsTest.Presenters
             _repository = repository;
             _alarmManager = alarmManager;
             _authService = authService;
+            _plcManager = plcManager; // 🆕 赋值
 
             _view.LoadView += OnLoadView;
             _view.DeviceSelected += OnDeviceSelected;
@@ -101,6 +106,15 @@ namespace GtsTest.Presenters
                 {
                     _view.UpdateDeviceProduction(id, current, target);
                     UpdateGlobalStats();
+                });
+            };
+
+            _deviceManager.OnDeviceStateChanged += (id, state, reason) =>
+            {
+                RunOnUI(() =>
+                {
+                    _view.UpdateDeviceState(id, state, reason);
+                    if (id == _selectedDeviceId) UpdateStatusBar();
                 });
             };
 
@@ -222,7 +236,8 @@ namespace GtsTest.Presenters
             {
                 DeviceId = d.Config.DeviceId,
                 Name = d.Config.Name,
-                IsOnline = d.IsOnline
+                IsOnline = d.IsOnline,
+                State = d.StateMachine.CurrentState
             });
             _view.UpdateDeviceList(items);
 
@@ -248,7 +263,7 @@ namespace GtsTest.Presenters
             var device = _deviceManager.GetDevice(_selectedDeviceId);
             if (device == null)
             {
-                _view.UpdateStatusBar("", false, false, "正常", false, "空闲", 0, false);
+                _view.UpdateStatusBar("", false, DeviceState.Idle, false, "正常", false, "空闲", 0, false);
                 return;
             }
 
@@ -273,6 +288,7 @@ namespace GtsTest.Presenters
             _view.UpdateStatusBar(
                 device.Config.Name,
                 isOnline,
+                device.StateMachine.CurrentState,
                 servoOn,
                 limitStatus,
                 modbusConnected,
@@ -399,7 +415,7 @@ namespace GtsTest.Presenters
                 _view.ShowMessage($"设备 {device.Config.Name} 不在线，无法启动", "警告", MessageType.Warning);
                 return;
             }
-            if (device.IsRunning)
+            if (device.StateMachine.CurrentState == DeviceState.Running)
             {
                 _view.ShowMessage($"设备 {device.Config.Name} 已在运行中", "提示", MessageType.Info);
                 return;
@@ -501,6 +517,7 @@ namespace GtsTest.Presenters
             }
         }
 
+        // ✅ 修复点 1：OnStopSelected —— 只要不是 Idle 就允许停止
         private void OnStopSelected(object sender, EventArgs e)
         {
             if (!CheckPermission("Device.Stop")) return;
@@ -512,13 +529,16 @@ namespace GtsTest.Presenters
             }
             var device = _deviceManager.GetDevice(deviceId);
             if (device == null) return;
-            if (!device.IsRunning)
+
+            if (device.StateMachine.CurrentState == DeviceState.Idle)
             {
                 _view.ShowMessage($"设备 {device.Config.Name} 未在运行", "提示", MessageType.Info);
                 return;
             }
+
             if (!_view.ShowConfirm($"确定停止设备 {device.Config.Name} 吗？", "确认停止"))
                 return;
+
             if (_deviceManager.StopDevice(deviceId))
             {
                 var user = SessionManager.CurrentUser;
@@ -702,7 +722,8 @@ namespace GtsTest.Presenters
                 _model,
                 _repository,
                 _authService,
-                user))
+                user,
+                _plcManager)) // 🆕 传入 _plcManager
             {
                 form.ShowDialog(_view as Form);
             }
@@ -714,40 +735,31 @@ namespace GtsTest.Presenters
             UpdateStatusBar();
         }
 
-        // ============================================================
-        // ⭐ 关键：启动工作流必须通过 DeviceManager.StartDevice
-        // 确保走 DeviceLoopAsync 循环，触发 MES 上报
-        // ============================================================
         private void OnWorkflowRun(object sender, string workflowName)
         {
             if (!CheckPermission("Workflow.Run")) return;
-
             if (string.IsNullOrEmpty(_selectedDeviceId))
             {
                 _view.ShowMessage("请先选择一台设备", "提示", MessageType.Warning);
                 return;
             }
-
             var device = _deviceManager.GetDevice(_selectedDeviceId);
             if (device == null || !device.IsOnline)
             {
                 _view.ShowMessage("设备不在线，无法运行工作流", "提示", MessageType.Warning);
                 return;
             }
-
             if (string.IsNullOrEmpty(workflowName))
             {
                 _view.ShowMessage("请选择工作流", "提示", MessageType.Warning);
                 return;
             }
-
             string filePath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Workflows", workflowName + ".json");
             if (!File.Exists(filePath))
             {
                 _view.ShowMessage($"工作流文件 {workflowName}.json 不存在", "错误", MessageType.Error);
                 return;
             }
-
             var config = LoadWorkflowFromJson(filePath);
             if (config == null)
             {
@@ -760,12 +772,7 @@ namespace GtsTest.Presenters
             _view.AppendExecutionLog(logMsg);
             _view.AppendExecutionLog($"设备: {device.Config.Name}");
 
-            // ========================================================
-            // ⭐ 三段式启动：先停止 → 设置工作流 → 再启动
-            // ========================================================
-
-            // 1. 先停止（若在运行）
-            if (device.IsRunning)
+            if (device.StateMachine.CurrentState == DeviceState.Running)
             {
                 _view.AppendExecutionLog("⏹ 设备正在运行，先停止...");
                 _deviceManager.StopDevice(_selectedDeviceId);
@@ -773,24 +780,12 @@ namespace GtsTest.Presenters
                 _view.AppendExecutionLog("✅ 设备已停止");
             }
 
-            // 2. 设置工作流（必须在停止状态）
-            if (!_deviceManager.SetDeviceWorkflow(_selectedDeviceId, workflowName))
-            {
-                _view.AppendExecutionLog($"❌ 设置工作流失败");
-                _view.ShowMessage($"设备 {device.Config.Name} 设置工作流失败", "错误", MessageType.Error);
-                return;
-            }
-            _view.AppendExecutionLog($"📋 已设置工作流: {workflowName}");
-
-            // 3. 通过 DeviceManager.StartDevice 启动（进入 DeviceLoopAsync 循环）
             if (_deviceManager.StartDevice(_selectedDeviceId, workflowName))
             {
                 _view.ShowMessage($"设备 {device.Config.Name} 已启动，工作流: {workflowName}", "提示", MessageType.Info);
                 _view.AppendExecutionLog($"✅ 设备 {device.Config.Name} 已启动，工作流: {workflowName}");
-
                 var user = SessionManager.CurrentUser;
-                AuditService.Log(user?.Id ?? 0, user?.Username ?? "系统", "RunWorkflow",
-                    $"启动工作流 {workflowName} 在设备 {device.Config.Name}", _repository);
+                AuditService.Log(user?.Id ?? 0, user?.Username ?? "系统", "RunWorkflow", $"启动工作流 {workflowName} 在设备 {device.Config.Name}", _repository);
             }
             else
             {
@@ -799,25 +794,38 @@ namespace GtsTest.Presenters
             }
         }
 
+        // ✅ 修复点 2：OnWorkflowStop —— 只要不是 Idle 就停
         private void OnWorkflowStop(object sender, EventArgs e)
         {
             if (!CheckPermission("Workflow.Stop")) return;
+
             if (!string.IsNullOrEmpty(_selectedDeviceId))
             {
                 var device = _deviceManager.GetDevice(_selectedDeviceId);
-                if (device != null && device.IsRunning)
+                if (device != null && device.StateMachine.CurrentState != DeviceState.Idle)
                 {
                     _view.AppendExecutionLog($"⏹ 正在停止设备 {device.Config.Name}...");
                     _deviceManager.StopDevice(_selectedDeviceId);
                     _view.AppendExecutionLog($"✅ 设备 {device.Config.Name} 已停止");
                 }
+                else
+                {
+                    _view.AppendExecutionLog($"设备 {device?.Config.Name ?? ""} 未在运行，无需停止");
+                }
             }
+
             _workflowCts?.Cancel();
             _logger.Info("工作流已停止", "Operation");
             _view.AppendExecutionLog("⏹ 工作流已停止");
             var user = SessionManager.CurrentUser;
             AuditService.Log(user?.Id ?? 0, user?.Username ?? "系统", "StopWorkflow", "停止工作流", _repository);
             _view.ShowMessage("工作流已停止", "提示", MessageType.Info);
+
+            RunOnUI(() =>
+            {
+                UpdateDeviceList();
+                UpdateStatusBar();
+            });
         }
 
         private void OnProductionReset(object sender, EventArgs e)

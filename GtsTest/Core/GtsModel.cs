@@ -1,5 +1,7 @@
 ﻿using System;
+using GtsTest.Models; // 确保引用了 DeviceRuntime
 using GtsTest.gts;
+
 
 namespace GtsTest.Core
 {
@@ -285,16 +287,31 @@ namespace GtsTest.Core
             return (value & (1 << ioIndex)) != 0;
         }
 
-        // ================================================================
-        // 🆕 硬件急停检测方法（新增）
-        // ================================================================
-        /// <summary>
-        /// 检测硬件急停按钮是否被按下。
-        /// 假设急停按钮连接到 GPI 的指定索引（默认为 0），常闭触点（按下为 0）。
-        /// 若使用常开触点，请修改返回值判断逻辑。
-        /// </summary>
-        /// <returns>true 表示急停被按下，false 表示未按下</returns>
-        public bool IsEmergencyStopPressed()
+
+/// <summary>
+/// 读取 DI，优先读取强制模拟值（用于现场调试）
+/// </summary>
+    public bool ReadDIWithForce(int ioIndex, DeviceRuntime? runtime)
+    {
+        // 优先检查强制模拟
+        if (runtime != null && runtime.ForcedIOs.TryGetValue(ioIndex, out bool forcedValue))
+        {
+            return forcedValue;
+        }
+
+        // 没有强制则读取真实硬件
+        return ReadDI(ioIndex);
+    }
+    // ================================================================
+    // 🆕 硬件急停检测方法（新增）
+    // ================================================================
+    /// <summary>
+    /// 检测硬件急停按钮是否被按下。
+    /// 假设急停按钮连接到 GPI 的指定索引（默认为 0），常闭触点（按下为 0）。
+    /// 若使用常开触点，请修改返回值判断逻辑。
+    /// </summary>
+    /// <returns>true 表示急停被按下，false 表示未按下</returns>
+    public bool IsEmergencyStopPressed()
         {
             if (UseSimulation)
             {

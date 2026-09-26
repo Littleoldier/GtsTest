@@ -1,18 +1,12 @@
-﻿using System.Collections.Generic;
-using GtsTest.Models;
-
-namespace GtsTest.Services.Data
+﻿namespace GtsTest.Services.Data
 {
-    public interface IDataRepository
+    /// <summary>
+    /// 兼容接口：历史上用于用户仓储，现在语义上就是 IUserRepository。
+    /// 保留此名称以保证老代码（如 LoginForm / AuthenticationService）零改动。
+    ///
+    /// 新代码请直接依赖 IUserRepository。
+    /// </summary>
+    public interface IDataRepository : IUserRepository
     {
-        // Users
-        User? GetUserByUsername(string username);
-        bool AddUser(User user);
-        bool UpdateUser(User user);
-        List<User> GetAllUsers(bool includeDeleted = false);   // 支持查询已删除用户
-
-        // ---- 逻辑删除相关 ----
-        bool SoftDeleteUser(long userId, string deletedBy);
-        bool RestoreUser(long userId);
     }
 }

@@ -7,6 +7,10 @@
     <UseWindowsForms>true</UseWindowsForms>
     <ImplicitUsings>enable</ImplicitUsings>
     <PlatformTarget>x86</PlatformTarget>
+
+    <Version>1.0.1</Version>
+    <AssemblyVersion>1.0.1.0</AssemblyVersion>
+    <FileVersion>1.0.1.0</FileVersion>
   </PropertyGroup>
 
   <ItemGroup>
@@ -20,10 +24,22 @@
     <None Remove="README.md" />
   </ItemGroup>
 
+  <!-- 把配置文件复制到输出目录 -->
   <ItemGroup>
-    <PackageReference Include="Emgu.CV" Version="4.13.0.5924" />
-    <PackageReference Include="Emgu.CV.Bitmap" Version="4.13.0.5924" />
-    <PackageReference Include="Emgu.CV.runtime.windows" Version="4.13.0.5924" />
+    <None Update="appsettings.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Update="devices.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Update="mes_config.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Emgu.CV / OpenCvSharp 已卸载（GtsTest 不做图像处理，视觉在 HalconVisionServer） -->
+
     <PackageReference Include="HslCommunication" Version="11.8.2" />
     <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.11" />
     <PackageReference Include="Microsoft.EntityFrameworkCore" Version="8.0.0" />
@@ -43,6 +59,8 @@
     <PackageReference Include="S7NetPlus" Version="0.20.0" />
     <PackageReference Include="System.IO.Ports" Version="10.0.10" />
     <PackageReference Include="WinForms.DataVisualization" Version="1.10.2" />
+    <PackageReference Include="Dapper" Version="2.1.35" />
+    <PackageReference Include="Microsoft.Data.SqlClient" Version="5.2.1" />
   </ItemGroup>
 
 </Project>

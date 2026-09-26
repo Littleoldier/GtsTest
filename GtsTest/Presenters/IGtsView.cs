@@ -1,4 +1,5 @@
-﻿using GtsTest.Services.Data;
+﻿using GtsTest.Core;
+using GtsTest.Services.Data;
 using System;
 using System.Collections.Generic;
 
@@ -22,11 +23,16 @@ namespace GtsTest.Presenters
         void UpdateDeviceStep(string deviceId, string step);
         void UpdateDeviceData(string deviceId, object data);
 
+        // ---------- 🆕 状态机状态 ----------
+        /// <summary>设备状态机变化时更新 UI（圆点颜色、状态文本、状态栏）</summary>
+        void UpdateDeviceState(string deviceId, DeviceState state, string reason);
+
         // ---------- 统计 ----------
         void UpdateGlobalStats(int onlineCount, int totalCount, int totalProduction);
 
         // ---------- 状态栏 ----------
-        void UpdateStatusBar(string deviceName, bool isOnline, bool servoOn,
+        /// <summary>🆕 增加 DeviceState 参数，用于显示精确状态</summary>
+        void UpdateStatusBar(string deviceName, bool isOnline, DeviceState state, bool servoOn,
                              string limitStatus, bool modbusConnected, string currentStep,
                              int watchdogRemainingMs, bool watchdogTimeout);
 
@@ -82,15 +88,19 @@ namespace GtsTest.Presenters
         event EventHandler WorkflowStopClicked;
         event EventHandler<string> DeviceForWorkflowSelected;
         event EventHandler ProductionResetClicked;
-        event EventHandler BindDeviceWorkflowClicked;   // 
+        event EventHandler BindDeviceWorkflowClicked;
     }
 
     public enum MessageType { Info, Warning, Error, Question }
 
+    /// <summary>设备列表项</summary>
     public class DeviceListItem
     {
         public string DeviceId { get; set; } = "";
         public string Name { get; set; } = "";
         public bool IsOnline { get; set; }
+
+        /// <summary>🆕 状态机当前状态</summary>
+        public DeviceState State { get; set; } = DeviceState.Idle;
     }
 }

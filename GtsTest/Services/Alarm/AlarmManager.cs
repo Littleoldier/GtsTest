@@ -1,55 +1,38 @@
-﻿using GtsTest.Core;
+﻿using GtsTest.Data;
 using GtsTest.Services.Data;
-using Microsoft.Data.Sqlite;
+using GtsTest.Services.Logging;
 using System;
 using System.Collections.Generic;
-using System.IO;
 using System.Linq;
 
 namespace GtsTest.Services.Alarm
 {
     public class AlarmManager : IAlarmManager
     {
-        private readonly string _connStr;
         private readonly List<AlarmRecord> _alarms = new List<AlarmRecord>();
         private readonly object _lock = new object();
+        private readonly IAlarmRepository _repository;
+        private readonly ILogger _logger;
         private bool _loaded = false;
 
         public event EventHandler<AlarmRecord> AlarmAdded;
         public event EventHandler<int> AlarmAcknowledged;
         public event EventHandler<int> AlarmResolved;
 
-        public AlarmManager()
-        {
-            var dbPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "gts.db");
-            _connStr = new SqliteConnectionStringBuilder { DataSource = dbPath }.ToString();
-            EnsureTable();
-            LoadFromDatabase();
-        }
+        /// <summary>无参构造（向后兼容旧代码，内部自行组装仓储）</summary>
+        public AlarmManager() : this(null, null) { }
 
-        private void EnsureTable()
+        /// <summary>DI 注入构造</summary>
+        public AlarmManager(IAlarmRepository? repository, ILogger? logger)
         {
-            using var conn = new SqliteConnection(_connStr);
-            conn.Open();
-            using var cmd = conn.CreateCommand();
-            cmd.CommandText = @"
-                CREATE TABLE IF NOT EXISTS AlarmRecords (
-                    Id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    DeviceId TEXT,
-                    Message TEXT,
-                    Severity TEXT,
-                    Timestamp TEXT,
-                    IsAcknowledged INTEGER,
-                    IsResolved INTEGER,
-                    AcknowledgedBy TEXT,
-                    ResolvedBy TEXT,
-                    AcknowledgedTime TEXT,
-                    ResolvedTime TEXT
-                );
-                CREATE INDEX IF NOT EXISTS idx_alarm_timestamp ON AlarmRecords(Timestamp DESC);
-                CREATE INDEX IF NOT EXISTS idx_alarm_resolved ON AlarmRecords(IsResolved);
-            ";
-            cmd.ExecuteNonQuery();
+            _logger = logger ?? new AppLoggerWrapper();
+
+            // DI 未提供仓储时降级自组装（保证旧代码可用）
+             _repository = repository
+                ?? new AlarmRepository(new DbConnectionFactory(), _logger); 
+
+            _repository.EnsureTable();
+            LoadFromDatabase();
         }
 
         public void LoadFromDatabase()
@@ -57,16 +40,10 @@ namespace GtsTest.Services.Alarm
             lock (_lock)
             {
                 _alarms.Clear();
-                using var conn = new SqliteConnection(_connStr);
-                conn.Open();
-                using var cmd = conn.CreateCommand();
-                cmd.CommandText = "SELECT * FROM AlarmRecords WHERE IsResolved = 0 ORDER BY Timestamp DESC;";
-                using var rdr = cmd.ExecuteReader();
-                while (rdr.Read())
-                {
-                    _alarms.Add(MapAlarm(rdr));
-                }
+                var active = _repository.QueryActive();
+                _alarms.AddRange(active);
                 _loaded = true;
+                _logger.Info($"📚 已加载 {active.Count} 条活动报警", "AlarmManager");
             }
         }
 
@@ -82,39 +59,27 @@ namespace GtsTest.Services.Alarm
                 IsResolved = false
             };
 
-            // 先插入数据库获取 Id
-            lock (_lock)
+            // 1. 持久化，回填 Id
+            try
             {
-                using var conn = new SqliteConnection(_connStr);
-                conn.Open();
-                using var cmd = conn.CreateCommand();
-                cmd.CommandText = @"
-                    INSERT INTO AlarmRecords (DeviceId, Message, Severity, Timestamp, IsAcknowledged, IsResolved, AcknowledgedBy, ResolvedBy, AcknowledgedTime, ResolvedTime)
-                    VALUES (@dev, @msg, @sev, @ts, @ack, @res, @ackBy, @resBy, @ackTime, @resTime);
-                    SELECT last_insert_rowid();";
-                cmd.Parameters.AddWithValue("@dev", record.DeviceId ?? "");
-                cmd.Parameters.AddWithValue("@msg", record.Message);
-                cmd.Parameters.AddWithValue("@sev", record.Severity.ToString());
-                cmd.Parameters.AddWithValue("@ts", record.Timestamp.ToString("o"));
-                cmd.Parameters.AddWithValue("@ack", 0);
-                cmd.Parameters.AddWithValue("@res", 0);
-                cmd.Parameters.AddWithValue("@ackBy", "");
-                cmd.Parameters.AddWithValue("@resBy", "");
-                cmd.Parameters.AddWithValue("@ackTime", "");
-                cmd.Parameters.AddWithValue("@resTime", "");
-                record.Id = Convert.ToInt32(cmd.ExecuteScalar());
+                record.Id = _repository.Insert(record);
+            }
+            catch (Exception ex)
+            {
+                _logger.Error($"❌ 报警写入数据库失败: {ex.Message}", "AlarmManager");
+                return;
             }
 
-            // 加入内存列表
+            // 2. 加入内存列表
             lock (_lock)
             {
                 _alarms.Insert(0, record);
             }
 
+            // 3. 事件通知（只触发一次）
             AlarmAdded?.Invoke(this, record);
 
-            AppLogger.Info($"🔔 报警触发: 设备={deviceId}, 严重等级={severity}, 消息={message}", "AlarmManager");
-            AlarmAdded?.Invoke(this, record);
+            _logger.Info($"🔔 报警触发: 设备={deviceId}, 严重等级={severity}, 消息={message}", "AlarmManager");
         }
 
         public bool AcknowledgeAlarm(int alarmId, string user)
@@ -128,7 +93,9 @@ namespace GtsTest.Services.Alarm
                 alarm.AcknowledgedBy = user;
                 alarm.AcknowledgedTime = DateTime.Now;
 
-                UpdateRecord(alarm);
+                try { _repository.Update(alarm); }
+                catch (Exception ex) { _logger.Error($"❌ 确认报警写库失败: {ex.Message}", "AlarmManager"); }
+
                 AlarmAcknowledged?.Invoke(this, alarmId);
                 return true;
             }
@@ -145,34 +112,12 @@ namespace GtsTest.Services.Alarm
                 alarm.ResolvedBy = user;
                 alarm.ResolvedTime = DateTime.Now;
 
-                UpdateRecord(alarm);
+                try { _repository.Update(alarm); }
+                catch (Exception ex) { _logger.Error($"❌ 解决报警写库失败: {ex.Message}", "AlarmManager"); }
+
                 AlarmResolved?.Invoke(this, alarmId);
                 return true;
             }
-        }
-
-        private void UpdateRecord(AlarmRecord alarm)
-        {
-            using var conn = new SqliteConnection(_connStr);
-            conn.Open();
-            using var cmd = conn.CreateCommand();
-            cmd.CommandText = @"
-                UPDATE AlarmRecords SET
-                    IsAcknowledged = @ack,
-                    IsResolved = @res,
-                    AcknowledgedBy = @ackBy,
-                    ResolvedBy = @resBy,
-                    AcknowledgedTime = @ackTime,
-                    ResolvedTime = @resTime
-                WHERE Id = @id;";
-            cmd.Parameters.AddWithValue("@ack", alarm.IsAcknowledged ? 1 : 0);
-            cmd.Parameters.AddWithValue("@res", alarm.IsResolved ? 1 : 0);
-            cmd.Parameters.AddWithValue("@ackBy", alarm.AcknowledgedBy ?? "");
-            cmd.Parameters.AddWithValue("@resBy", alarm.ResolvedBy ?? "");
-            cmd.Parameters.AddWithValue("@ackTime", alarm.AcknowledgedTime?.ToString("o") ?? "");
-            cmd.Parameters.AddWithValue("@resTime", alarm.ResolvedTime?.ToString("o") ?? "");
-            cmd.Parameters.AddWithValue("@id", alarm.Id);
-            cmd.ExecuteNonQuery();
         }
 
         public IEnumerable<AlarmRecord> GetActiveAlarms()
@@ -183,41 +128,6 @@ namespace GtsTest.Services.Alarm
         public IEnumerable<AlarmRecord> GetAllAlarms()
         {
             lock (_lock) return _alarms.ToList();
-        }
-
-        private AlarmRecord MapAlarm(SqliteDataReader rdr)
-        {
-            // 辅助方法：安全解析日期时间
-            DateTime SafeParseDateTime(object value)
-            {
-                if (value == DBNull.Value) return DateTime.MinValue;
-                string s = value.ToString();
-                if (string.IsNullOrEmpty(s)) return DateTime.MinValue;
-                return DateTime.TryParse(s, out var dt) ? dt : DateTime.MinValue;
-            }
-
-            DateTime? SafeParseNullableDateTime(object value)
-            {
-                if (value == DBNull.Value) return null;
-                string s = value.ToString();
-                if (string.IsNullOrEmpty(s)) return null;
-                return DateTime.TryParse(s, out var dt) ? dt : (DateTime?)null;
-            }
-
-            return new AlarmRecord
-            {
-                Id = rdr.GetInt32(0),
-                DeviceId = rdr.IsDBNull(1) ? null : rdr.GetString(1),
-                Message = rdr.GetString(2),
-                Severity = Enum.Parse<AlarmSeverity>(rdr.GetString(3)),
-                Timestamp = SafeParseDateTime(rdr[4]),
-                IsAcknowledged = rdr.GetInt32(5) == 1,
-                IsResolved = rdr.GetInt32(6) == 1,
-                AcknowledgedBy = rdr.IsDBNull(7) ? null : rdr.GetString(7),
-                ResolvedBy = rdr.IsDBNull(8) ? null : rdr.GetString(8),
-                AcknowledgedTime = SafeParseNullableDateTime(rdr[9]),
-                ResolvedTime = SafeParseNullableDateTime(rdr[10])
-            };
         }
     }
 }

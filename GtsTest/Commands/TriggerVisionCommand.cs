@@ -23,10 +23,7 @@ namespace GtsTest.Commands
         private readonly DeviceManager _deviceManager;
         private ModbusClient? _modbusClient;
 
-        // ============================================================
-        // 视觉结果（供上层读取）
-        // ============================================================
-        public bool? VisionPass { get; private set; }        // true=OK, false=NG, null=未获取
+        public bool? VisionPass { get; private set; }
         public double DiameterMm { get; private set; }
         public double X { get; private set; }
         public double Y { get; private set; }
@@ -51,7 +48,9 @@ namespace GtsTest.Commands
                 IpAddress = _config.VisionServerIp,
                 Port = _config.VisionServerPort,
                 SlaveAddress = 1,
-                TimeoutMs = 3000
+                TimeoutMs = 3000,
+                AddressType = AddressType.Coil,   // 视觉服务器忙状态/结果都是线圈
+                DataType = DataType.UInt16        // 用 UInt16 明确类型
             };
 
             _modbusClient = new ModbusClient(modbusConfig);
@@ -64,13 +63,11 @@ namespace GtsTest.Commands
                 // ============================================================
                 Log($"正在连接视觉服务器 {_config.VisionServerIp}:{_config.VisionServerPort}...");
                 if (!_modbusClient.Connect())
-                {
                     throw new Exception($"无法连接到视觉服务器 {_config.VisionServerIp}:{_config.VisionServerPort}");
-                }
                 Log($"✅ 视觉服务器连接成功");
 
                 // ============================================================
-                // 3. 检查忙状态
+                // 3. 检查忙状态（读线圈）
                 // ============================================================
                 ct.ThrowIfCancellationRequested();
 
@@ -79,7 +76,7 @@ namespace GtsTest.Commands
                 while (isBusy && retryCount < 3)
                 {
                     var busyResult = _modbusClient.ReadDataByType((ushort)_config.BusyCoilAddress, 1);
-                    if (busyResult?.RawRegisters != null && busyResult.RawRegisters.Length > 0)
+                    if (busyResult?.RawRegisters?.Length > 0)
                     {
                         isBusy = busyResult.RawRegisters[0] == 1;
                         if (isBusy)
@@ -125,11 +122,10 @@ namespace GtsTest.Commands
                     ct.ThrowIfCancellationRequested();
 
                     var status = _modbusClient.ReadDataByType((ushort)_config.BusyCoilAddress, 1);
-                    if (status?.RawRegisters != null && status.RawRegisters.Length > 0)
+                    if (status?.RawRegisters?.Length > 0)
                     {
                         isBusyState = status.RawRegisters[0] == 1;
                         pollCount++;
-
                         if (pollCount % 20 == 0)
                             Log($"⏳ 等待视觉完成... ({sw.ElapsedMilliseconds}ms)");
                     }
@@ -149,70 +145,65 @@ namespace GtsTest.Commands
                     throw new TimeoutException($"视觉拍照超时 ({_config.VisionTimeoutMs}ms)");
 
                 // ============================================================
-                // 6. 读取结果
+                // 6. 读取结果（★ 用 Raw，绕过 ConvertRawToType 的字节交换）
                 // ============================================================
-                ct.ThrowIfCancellationRequested();
 
-                var resultCoil = _modbusClient.ReadDataByType((ushort)_config.ResultCoilAddress, 1);
-                var resultCode = _modbusClient.ReadHoldingRegisters((ushort)_config.ResultCodeRegister, 1);
-
-                ushort[]? codeRegs = resultCode as ushort[];
-                int code = (codeRegs?.Length > 0) ? codeRegs[0] : 999;
-
-                // ⭐ 读取直径 / 坐标 / 缺陷数
-                try
+                // ---- 6.1 结果码寄存器（地址 1000 = 0x03E8）----
+                var codeRead = _modbusClient.ReadHoldingRegistersWithRaw((ushort)_config.ResultCodeRegister, 1);
+                int code = 999;
+                if (codeRead?.RawRegisters?.Length > 0)
                 {
-                    var diaRegs = _modbusClient.ReadHoldingRegisters((ushort)1003, 1);
-                    if (diaRegs is ushort[] d && d.Length > 0)
-                        DiameterMm = d[0] / 100.0;
-
-                    var xRegs = _modbusClient.ReadHoldingRegisters((ushort)1005, 1);
-                    if (xRegs is ushort[] xr && xr.Length > 0)
-                        X = (short)xr[0] / 100.0;
-
-                    var yRegs = _modbusClient.ReadHoldingRegisters((ushort)1006, 1);
-                    if (yRegs is ushort[] yr && yr.Length > 0)
-                        Y = (short)yr[0] / 100.0;
-
-                    var dRegs = _modbusClient.ReadHoldingRegisters((ushort)1004, 1);
-                    if (dRegs is ushort[] dr && dr.Length > 0)
-                        DefectCount = dr[0];
+                    code = codeRead.RawRegisters[0];
+                    Log($"📋 结果码 = {code} (0x{code:X4})");
                 }
-                catch { }
+
+                // ---- 6.2 直径（地址 1003），单位 0.01mm ----
+                var diaRead = _modbusClient.ReadHoldingRegistersWithRaw((ushort)1003, 1);
+                if (diaRead?.RawRegisters?.Length > 0)
+                    DiameterMm = diaRead.RawRegisters[0] / 100.0;
+
+                // ---- 6.3 缺陷数（地址 1004）----
+                var defRead = _modbusClient.ReadHoldingRegistersWithRaw((ushort)1004, 1);
+                if (defRead?.RawRegisters?.Length > 0)
+                    DefectCount = defRead.RawRegisters[0];
+
+                // ---- 6.4 X 坐标（地址 1005），单位 0.01mm，有符号 ----
+                var xRead = _modbusClient.ReadHoldingRegistersWithRaw((ushort)1005, 1);
+                if (xRead?.RawRegisters?.Length > 0)
+                    X = (short)xRead.RawRegisters[0] / 100.0;
+
+                // ---- 6.5 Y 坐标（地址 1006），单位 0.01mm，有符号 ----
+                var yRead = _modbusClient.ReadHoldingRegistersWithRaw((ushort)1006, 1);
+                if (yRead?.RawRegisters?.Length > 0)
+                    Y = (short)yRead.RawRegisters[0] / 100.0;
 
                 // ============================================================
-                // 7. ⭐⭐⭐ 结果判定：区分业务 NG 与系统故障 ⭐⭐⭐
+                // 7. 结果判定
                 // ============================================================
                 if (code == 0)
                 {
-                    // ✅ OK
                     VisionPass = true;
                     Log($"✅ 视觉执行成功 (结果码: 0)");
                     Log($"📏 直径: {DiameterMm:F2} mm");
                     Log($"🔍 缺陷数: {DefectCount}");
                     Log($"📍 X 坐标: {X:F2}");
                     Log($"📍 Y 坐标: {Y:F2}");
-
                     SaveResultToContext(true);
                 }
                 else if (code == 3)
                 {
-                    // ⚠️ 业务 NG：未检测到目标 / 尺寸超差
-                    // → 不抛异常，工作流继续
                     VisionPass = false;
                     Log($"⚠️ 视觉结果: NG（未检测到目标或尺寸超差）(结果码: 3)");
 
-                    bool coilSuccess = resultCoil?.RawRegisters != null &&
-                                       resultCoil.RawRegisters.Length > 0 &&
-                                       resultCoil.RawRegisters[0] == 1;
-                    Log($"   ResultCoil = {(coilSuccess ? "true" : "false")}");
+                    var coilResult = _modbusClient.ReadDataByType((ushort)_config.ResultCoilAddress, 1);
+                    bool coil = coilResult?.RawRegisters?.Length > 0 && coilResult.RawRegisters[0] == 1;
+                    Log($"   ResultCoil = {coil}");
 
                     SaveResultToContext(false);
-                    // ⭐ 关键：不抛异常
+                    // 不抛异常，工作流继续
                 }
                 else
                 {
-                    // ❌ 系统故障：抛异常，暂停工作流
                     string errorMsg = code switch
                     {
                         1 => "视觉系统内部错误",
@@ -251,9 +242,6 @@ namespace GtsTest.Commands
             }
         }
 
-        /// <summary>
-        /// 把视觉结果写入设备上下文，供上层（MES 上报等）读取
-        /// </summary>
         private void SaveResultToContext(bool pass)
         {
             try
@@ -274,9 +262,6 @@ namespace GtsTest.Commands
             catch { }
         }
 
-        /// <summary>
-        /// 急停处理
-        /// </summary>
         public override void Stop()
         {
             Log($"🛑 收到停止信号，立即断开视觉服务器连接");

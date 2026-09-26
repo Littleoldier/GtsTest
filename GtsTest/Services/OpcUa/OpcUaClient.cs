@@ -1,4 +1,5 @@
 ﻿using GtsTest.Core;
+using GtsTest.Diagnostics;            // 🆕 报文监视器
 using Opc.Ua;
 using Opc.Ua.Client;
 using Opc.Ua.Server;
@@ -28,6 +29,28 @@ namespace GtsTest.Services.OpcUa
         public bool IsConnected => _session != null && _session.Connected;
         public string ServerUrl { get; private set; } = "";
 
+        // ================================================================
+        // 🆕 报文监视器上报（零侵入，绝不抛异常）
+        // ================================================================
+        private void ReportFrame(FrameDirection dir, string summary, string payload,
+                                 bool isError = false, string? errorMsg = null)
+        {
+            try
+            {
+                FrameMonitorHub.Instance.Publish(new FrameLogEntry
+                {
+                    Protocol = FrameProtocol.OpcUa,
+                    DeviceId = string.IsNullOrEmpty(ServerUrl) ? "" : ServerUrl,
+                    Direction = dir,
+                    Summary = summary,
+                    Payload = payload,
+                    IsError = isError,
+                    ErrorMessage = errorMsg
+                });
+            }
+            catch { /* 监视器异常不影响主业务 */ }
+        }
+
         // ---------- 连接管理 ----------
         public async Task<bool> ConnectAsync(string serverUrl)
         {
@@ -36,6 +59,8 @@ namespace GtsTest.Services.OpcUa
                 ErrorOccurred?.Invoke(this, "服务器 URL 不能为空");
                 return false;
             }
+
+            ReportFrame(FrameDirection.Info, $"正在连接: {serverUrl}", "");
 
             try
             {
@@ -65,36 +90,41 @@ namespace GtsTest.Services.OpcUa
                     }
                 };
 
-                // 使用 CoreClientUtils 自动选择无安全端点（1.4.x 支持）
                 var endpointDesc = CoreClientUtils.SelectEndpoint(serverUrl, false);
-
-                // 创建端点配置
                 var endpointConfiguration = EndpointConfiguration.Create(config);
                 var endpoint = new ConfiguredEndpoint(null, endpointDesc, endpointConfiguration);
-
-                // 匿名身份
                 var userIdentity = new UserIdentity();
 
                 var session = await ClientSession.Create(
                     config,
                     endpoint,
-                    false,          // updateBeforeConnect
-                    false,          // checkDomain
+                    false,
+                    false,
                     "GtsTest Client",
                     60000,
                     userIdentity,
                     null
                 );
 
+                // 🆕 把 Close() 挪出锁外，避免持锁做阻塞网络操作
+                ClientSession? oldSession;
                 lock (_lock)
                 {
-                    _session?.Close();
+                    oldSession = _session;
                     _session = session;
+                }
+                if (oldSession != null)
+                {
+                    try { oldSession.Close(); } catch { /* ignore */ }
                 }
 
                 ServerUrl = serverUrl;
                 ConnectionStateChanged?.Invoke(this, true);
                 AppLogger.Info($"OPC UA 已连接到 {serverUrl}", "OPC UA");
+
+                ReportFrame(FrameDirection.Info,
+                    $"✅ 连接成功: {endpointDesc.EndpointUrl}",
+                    $"SecurityPolicy: {endpointDesc.SecurityPolicyUri}");
 
                 CreateSubscription();
                 return true;
@@ -103,6 +133,10 @@ namespace GtsTest.Services.OpcUa
             {
                 ErrorOccurred?.Invoke(this, $"连接失败: {ex.Message}");
                 AppLogger.Error($"OPC UA 连接失败: {ex.Message}", "OPC UA");
+
+                ReportFrame(FrameDirection.Error,
+                    $"连接失败: {ex.Message}", "", isError: true, errorMsg: ex.Message);
+
                 return false;
             }
         }
@@ -125,7 +159,6 @@ namespace GtsTest.Services.OpcUa
             {
                 var subscription = new Opc.Ua.Client.Subscription
                 {
-                    // 注意：不设置 Session，由 AddSubscription 自动赋值
                     PublishingInterval = 1000,
                     KeepAliveCount = 10,
                     LifetimeCount = 20,
@@ -146,7 +179,10 @@ namespace GtsTest.Services.OpcUa
 
                 AppLogger.Info($"✅ OPC UA 订阅已创建 (ID={subscription.Id})", "OPC UA");
 
-                // 直接存储底层 Subscription，不包装
+                ReportFrame(FrameDirection.Info,
+                    $"📡 订阅已创建 (ID={subscription.Id})",
+                    $"PublishingInterval={subscription.PublishingInterval}ms");
+
                 _subscription = subscription;
             }
             catch (Exception ex)
@@ -154,22 +190,37 @@ namespace GtsTest.Services.OpcUa
                 AppLogger.Error($"❌ 订阅创建异常: {ex.Message}", "OPC UA");
                 _subscription = null;
                 ErrorOccurred?.Invoke(this, $"订阅创建失败: {ex.Message}");
+
+                ReportFrame(FrameDirection.Error,
+                    $"订阅创建失败: {ex.Message}", "", isError: true, errorMsg: ex.Message);
             }
         }
 
         public void Disconnect()
         {
+            var url = ServerUrl;
+
+            // 先在锁外清理订阅（避免持锁做网络操作）
+            try { UnsubscribeAll(); } catch { /* ignore */ }
+
+            ClientSession? oldSession;
+            ClientSubscription? oldSub;
             lock (_lock)
             {
-                UnsubscribeAll();
-                _subscription?.Delete(true);   // 删除订阅
+                oldSub = _subscription;
+                oldSession = _session;
                 _subscription = null;
-                _session?.Close();
                 _session = null;
                 ServerUrl = "";
-                ConnectionStateChanged?.Invoke(this, false);
-                AppLogger.Info("OPC UA 已断开", "OPC UA");
             }
+
+            // 🆕 网络清理全部在锁外
+            try { oldSub?.Delete(true); } catch { /* ignore */ }
+            try { oldSession?.Close(); } catch { /* ignore */ }
+
+            ConnectionStateChanged?.Invoke(this, false);
+            AppLogger.Info("OPC UA 已断开", "OPC UA");
+            ReportFrame(FrameDirection.Info, $"🔌 连接已断开: {url}", "");
         }
 
         // ---------- 数据操作 ----------
@@ -182,13 +233,31 @@ namespace GtsTest.Services.OpcUa
             {
                 var node = new NodeId(nodeId);
                 var result = await _session.ReadValueAsync(node);
+
                 if (result.StatusCode == StatusCodes.Good)
-                    return (T)result.Value;
+                {
+                    ReportFrame(FrameDirection.RX,
+                        $"📥 读节点 {nodeId} = {result.Value}",
+                        $"StatusCode=Good");
+
+                    // 🆕 泛型类型不匹配时给出明确提示，而不是裸 InvalidCastException
+                    if (result.Value is T typed)
+                        return typed;
+
+                    throw new InvalidCastException(
+                        $"读取值类型不匹配: 期望 {typeof(T).Name}, 实际 {result.Value?.GetType().Name ?? "null"}");
+                }
+
                 throw new Exception($"读取失败: {result.StatusCode}");
             }
             catch (Exception ex)
             {
                 ErrorOccurred?.Invoke(this, $"读取节点 {nodeId} 失败: {ex.Message}");
+
+                ReportFrame(FrameDirection.Error,
+                    $"读取节点 {nodeId} 失败: {ex.Message}", "",
+                    isError: true, errorMsg: ex.Message);
+
                 throw;
             }
         }
@@ -211,13 +280,24 @@ namespace GtsTest.Services.OpcUa
                 var collection = new WriteValueCollection { writeValue };
                 var response = await _session.WriteAsync(null, collection, CancellationToken.None);
                 var result = response.Results?[0] ?? StatusCodes.BadUnexpectedError;
+
                 if (result != StatusCodes.Good)
                     throw new Exception($"写入失败: {result}");
+
                 AppLogger.Info($"OPC UA 写入节点 {nodeId} = {value}", "OPC UA");
+
+                ReportFrame(FrameDirection.TX,
+                    $"📤 写节点 {nodeId} = {value}",
+                    $"StatusCode=Good");
             }
             catch (Exception ex)
             {
                 ErrorOccurred?.Invoke(this, $"写入节点 {nodeId} 失败: {ex.Message}");
+
+                ReportFrame(FrameDirection.Error,
+                    $"写入节点 {nodeId} 失败: {ex.Message}", "",
+                    isError: true, errorMsg: ex.Message);
+
                 throw;
             }
         }
@@ -242,16 +322,26 @@ namespace GtsTest.Services.OpcUa
                 var collection = new BrowseDescriptionCollection { description };
                 var response = await _session.BrowseAsync(null, null, 0, collection, CancellationToken.None);
                 var references = response.Results?[0]?.References;
+
                 if (references != null)
                 {
                     foreach (var refs in references)
                         results.Add($"{refs.DisplayName.Text} ({refs.NodeId})");
                 }
+
+                ReportFrame(FrameDirection.RX,
+                    $"📥 浏览节点 {nodeId ?? "Root"} 共 {results.Count} 项",
+                    "");
+
                 return results;
             }
             catch (Exception ex)
             {
                 ErrorOccurred?.Invoke(this, $"浏览节点失败: {ex.Message}");
+
+                ReportFrame(FrameDirection.Error,
+                    $"浏览节点失败: {ex.Message}", "", isError: true, errorMsg: ex.Message);
+
                 throw;
             }
         }
@@ -274,33 +364,40 @@ namespace GtsTest.Services.OpcUa
                     SamplingInterval = samplingInterval,
                     QueueSize = 10,
                     DiscardOldest = true,
-                    MonitoringMode = MonitoringMode.Reporting  // 确保为 Reporting
+                    MonitoringMode = MonitoringMode.Reporting
                 };
 
-                // 绑定事件（事件参数类型不同，但签名兼容）
                 item.Notification += OnMonitoredItemNotification;
 
-                // 添加到订阅（本地）
                 _subscription.AddItem(item);
                 _items[nodeId] = item;
 
-                // ✅ 关键：提交创建请求到服务器
-                _subscription.CreateItems();   // 或 ApplyChanges()
+                _subscription.CreateItems();
 
-                // 检查创建结果
                 if (item.Status == null || item.Status.Id == 0)
                 {
                     AppLogger.Error($"❌ 监控项创建失败：服务器未分配有效 ID (Status.Id={item.Status?.Id})", "OPC UA");
+
+                    ReportFrame(FrameDirection.Error,
+                        $"监控项创建失败: {nodeId}", "", isError: true);
+
                     _items.Remove(nodeId);
                     return;
                 }
 
                 AppLogger.Info($"✅ 监控项创建成功, ID={item.Status.Id}, SamplingInterval={item.SamplingInterval}", "OPC UA");
+
+                ReportFrame(FrameDirection.Info,
+                    $"📡 订阅节点 {nodeId} (ID={item.Status.Id}, {samplingInterval}ms)",
+                    "");
             }
             catch (Exception ex)
             {
                 ErrorOccurred?.Invoke(this, $"订阅节点 {nodeId} 失败: {ex.Message}");
                 AppLogger.Error($"❌ 订阅节点 {nodeId} 失败: {ex.Message}", "OPC UA");
+
+                ReportFrame(FrameDirection.Error,
+                    $"订阅节点 {nodeId} 失败: {ex.Message}", "", isError: true, errorMsg: ex.Message);
             }
         }
 
@@ -309,11 +406,9 @@ namespace GtsTest.Services.OpcUa
             if (string.IsNullOrEmpty(nodeIdString))
                 throw new ArgumentException("节点 ID 不能为空");
 
-            // 尝试直接构造（如果是纯数字，假定为 Numeric 类型，命名空间为 0）
             if (int.TryParse(nodeIdString, out int numericId))
-                return new NodeId((uint)numericId); // 转换为 uint
+                return new NodeId((uint)numericId);
 
-            // 尝试解析 "ns=3;i=1004" 或 "ns=3;s=SomeString" 格式
             var parts = nodeIdString.Split(';');
             int ns = 0;
             string identifier = "";
@@ -326,48 +421,48 @@ namespace GtsTest.Services.OpcUa
                 else if (part.StartsWith("s="))
                     identifier = part.Substring(2);
                 else
-                    identifier = part; // 如果直接是标识符
+                    identifier = part;
             }
 
-            // 尝试将标识符解析为数字（Numeric 类型）
             if (int.TryParse(identifier, out int id))
                 return new NodeId((uint)id, (ushort)ns);
 
-            // 否则作为 String 类型
             return new NodeId(identifier, (ushort)ns);
         }
 
-        //回调
+        // 回调
         private void OnMonitoredItemNotification(Opc.Ua.Client.MonitoredItem item, MonitoredItemNotificationEventArgs e)
         {
             AppLogger.Info($"📥 收到数据变化通知, NodeId: {item.StartNodeId}", "OPC UA");
 
             try
             {
-                // ✅ 正确获取通知值
                 var notification = e.NotificationValue as MonitoredItemNotification;
                 if (notification != null)
                 {
-                    var value = notification.Value;  // DataValue 类型
+                    var value = notification.Value;
                     if (value != null && value.Value != null)
                     {
                         var nodeId = item.StartNodeId.ToString();
                         DataValueChanged?.Invoke(this, $"{nodeId}|{value.Value}");
                         AppLogger.Info($"📤 触发 DataValueChanged 事件, 值: {value.Value}", "OPC UA");
+
+                        ReportFrame(FrameDirection.RX,
+                            $"📨 数据变化 {nodeId} = {value.Value}",
+                            $"Timestamp={value.SourceTimestamp:HH:mm:ss.fff}");
                     }
                     else
                     {
                         AppLogger.Warn($"⚠️ 通知值为空或无效", "OPC UA");
                     }
                 }
-                else
-                {
-                    AppLogger.Warn($"⚠️ 无法将 e.NotificationValue 转换为 MonitoredItemNotification", "OPC UA");
-                }
             }
             catch (Exception ex)
             {
                 AppLogger.Error($"❌ 数据回调异常: {ex.Message}", "OPC UA");
+
+                ReportFrame(FrameDirection.Error,
+                    $"数据回调异常: {ex.Message}", "", isError: true, errorMsg: ex.Message);
             }
         }
 
@@ -376,11 +471,12 @@ namespace GtsTest.Services.OpcUa
             if (_items.TryGetValue(nodeId, out var item))
             {
                 item.Notification -= OnMonitoredItemNotification;
-                _subscription?.RemoveItem(item);   // 从本地集合移除
+                _subscription?.RemoveItem(item);
                 _items.Remove(nodeId);
-                // 注意：RemoveItem 会将 item 加入删除列表，需调用 ApplyChanges 或 DeleteItems 真正删除
-                _subscription?.ApplyChanges();     // 提交删除请求
+                _subscription?.ApplyChanges();
                 AppLogger.Info($"OPC UA 取消订阅节点 {nodeId}", "OPC UA");
+
+                ReportFrame(FrameDirection.Info, $"🔕 取消订阅 {nodeId}", "");
             }
         }
 

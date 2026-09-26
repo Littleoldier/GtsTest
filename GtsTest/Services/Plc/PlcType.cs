@@ -23,8 +23,10 @@
         /// <summary>西门子 S7-200 Smart</summary>
         SiemensS200Smart = 5,
 
-        // 预留：三菱、欧姆龙
-        // MitsubishiMc = 10,
+        /// <summary>三菱 MC 协议</summary>
+        MitsubishiMc = 10,
+
+        // 预留：欧姆龙
         // OmronFins = 20,
     }
 }

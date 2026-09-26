@@ -64,6 +64,13 @@ namespace GtsTest.Forms
         private Button btnDisconnectModbus;
         private Label lblCurrentDevice;
 
+        // ==================== 🆕 IO 强制模拟 ====================
+        private GroupBox grpForceIO;
+        private NumericUpDown numForceIOIndex;
+        private CheckBox chkForceIOValue;
+        private Button btnForceIO;
+        private Button btnClearForceIO;
+
         // ==================== 视觉触发 ====================
         private Panel visionPanel;
         private Label lblVisionTitle;
@@ -318,45 +325,197 @@ namespace GtsTest.Forms
         }
 
         // ================================================================
-        //  设备控制 Tab
+        //  设备控制 Tab（IO 强制区：所有控件垂直居中对齐）
         // ================================================================
         private void BuildDeviceTab()
         {
             tabDevice = new TabPage { Text = "⚙️ 设备控制" };
 
-            devicePanel = new Panel { Dock = DockStyle.Fill, Padding = new Padding(20), Height = 180 };
+            var mainLayout = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 1,
+                RowCount = 4,
+                Padding = new Padding(20, 15, 20, 20),
+                BackColor = Color.White
+            };
+            mainLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+            mainLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 40F));   // 当前设备
+            mainLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 130F));  // 单设备控制
+            mainLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 100F));  // IO 强制模拟
+            mainLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));   // 空白
 
+            // ---------- 区域 1：当前设备 ----------
             lblCurrentDevice = new Label
             {
-                Location = new Point(20, 20),
-                Size = new Size(500, 25),
+                Dock = DockStyle.Fill,
                 Text = "当前设备: 未选择",
-                Font = new Font("Segoe UI", 10F, FontStyle.Bold),
-                ForeColor = Color.DarkBlue
+                Font = new Font("Segoe UI", 11F, FontStyle.Bold),
+                ForeColor = Color.DarkBlue,
+                TextAlign = ContentAlignment.MiddleLeft
             };
-            devicePanel.Controls.Add(lblCurrentDevice);
+            mainLayout.Controls.Add(lblCurrentDevice, 0, 0);
 
-            lblDevTitle = new Label
+            // ---------- 区域 2：单设备控制 ----------
+            var grpDeviceCtrl = new GroupBox
             {
-                Location = new Point(20, 55),
-                Size = new Size(120, 25),
-                Text = "单设备控制",
-                Font = new Font("Segoe UI", 10F, FontStyle.Bold)
+                Text = "🎛️ 单设备控制",
+                Dock = DockStyle.Fill,
+                Font = new Font("Segoe UI", 9F, FontStyle.Bold),
+                Padding = new Padding(10, 5, 10, 5)
             };
-            devicePanel.Controls.Add(lblDevTitle);
 
-            btnStartDevice = new Button { Location = new Point(20, 90), Size = new Size(100, 40), Text = "▶ 启动设备", BackColor = Color.LightGreen };
-            devicePanel.Controls.Add(btnStartDevice);
-            btnStopDevice = new Button { Location = new Point(130, 90), Size = new Size(100, 40), Text = "⏹ 停止设备", BackColor = Color.LightCoral };
-            devicePanel.Controls.Add(btnStopDevice);
-            btnDeviceConfig = new Button { Location = new Point(240, 90), Size = new Size(100, 40), Text = "⚙️ 配置" };
-            devicePanel.Controls.Add(btnDeviceConfig);
-            btnConnectModbus = new Button { Location = new Point(20, 140), Size = new Size(100, 40), Text = "🔌 连接 Modbus", BackColor = Color.LightBlue, Enabled = false };
-            devicePanel.Controls.Add(btnConnectModbus);
-            btnDisconnectModbus = new Button { Location = new Point(130, 140), Size = new Size(100, 40), Text = "🔌 断开 Modbus", BackColor = Color.LightPink, Enabled = false };
-            devicePanel.Controls.Add(btnDisconnectModbus);
+            var deviceBtnLayout = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 3,
+                RowCount = 2,
+                Padding = new Padding(5)
+            };
+            deviceBtnLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.33F));
+            deviceBtnLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.33F));
+            deviceBtnLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.34F));
+            deviceBtnLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 50F));
+            deviceBtnLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 50F));
 
-            tabDevice.Controls.Add(devicePanel);
+            btnStartDevice = new Button
+            {
+                Text = "▶ 启动设备",
+                Dock = DockStyle.Fill,
+                BackColor = Color.LightGreen,
+                FlatStyle = FlatStyle.Flat,
+                Margin = new Padding(3)
+            };
+            btnStopDevice = new Button
+            {
+                Text = "⏹ 停止设备",
+                Dock = DockStyle.Fill,
+                BackColor = Color.LightCoral,
+                FlatStyle = FlatStyle.Flat,
+                Margin = new Padding(3)
+            };
+            btnDeviceConfig = new Button
+            {
+                Text = "⚙️ 配置",
+                Dock = DockStyle.Fill,
+                FlatStyle = FlatStyle.Flat,
+                Margin = new Padding(3)
+            };
+            btnConnectModbus = new Button
+            {
+                Text = "🔌 连接 Modbus",
+                Dock = DockStyle.Fill,
+                BackColor = Color.LightBlue,
+                FlatStyle = FlatStyle.Flat,
+                Enabled = false,
+                Margin = new Padding(3)
+            };
+            btnDisconnectModbus = new Button
+            {
+                Text = "🔌 断开 Modbus",
+                Dock = DockStyle.Fill,
+                BackColor = Color.LightPink,
+                FlatStyle = FlatStyle.Flat,
+                Enabled = false,
+                Margin = new Padding(3)
+            };
+
+            deviceBtnLayout.Controls.Add(btnStartDevice, 0, 0);
+            deviceBtnLayout.Controls.Add(btnStopDevice, 1, 0);
+            deviceBtnLayout.Controls.Add(btnDeviceConfig, 2, 0);
+            deviceBtnLayout.Controls.Add(btnConnectModbus, 0, 1);
+            deviceBtnLayout.Controls.Add(btnDisconnectModbus, 1, 1);
+
+            grpDeviceCtrl.Controls.Add(deviceBtnLayout);
+            mainLayout.Controls.Add(grpDeviceCtrl, 0, 1);
+
+            // ---------- 区域 3：IO 强制模拟 ----------
+            grpForceIO = new GroupBox
+            {
+                Text = "🔧 IO 强制模拟（调试专用）",
+                Size = new Size(650, 90),
+                Anchor = AnchorStyles.Left | AnchorStyles.Top,
+                Margin = new Padding(0, 5, 0, 0),
+                Font = new Font("Segoe UI", 9F, FontStyle.Bold),
+                ForeColor = Color.DarkRed,
+                Padding = new Padding(8, 5, 8, 5)
+            };
+
+            var ioLayout = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 5,
+                RowCount = 1,
+                Padding = new Padding(5)
+            };
+            ioLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 75F));   // IO索引:
+            ioLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 100F));  // NumericUpDown
+            ioLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 130F));  // CheckBox
+            ioLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 140F));  // 应用强制
+            ioLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 150F));  // 清除全部
+            ioLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
+
+            // ---- 标签：右对齐 + 垂直居中 ----
+            var lblIOIndex = new Label
+            {
+                Text = "IO索引:",
+                TextAlign = ContentAlignment.MiddleRight,
+                Dock = DockStyle.Fill,
+                Margin = new Padding(0, 0, 5, 0)
+            };
+
+            // ---- NumericUpDown：Anchor=None 让它在单元格内垂直+水平居中 ----
+            numForceIOIndex = new NumericUpDown
+            {
+                Minimum = 0,
+                Maximum = 127,
+                Anchor = AnchorStyles.None,
+                Size = new Size(90, 25),
+                Margin = new Padding(0)
+            };
+
+            // ---- CheckBox：Anchor=None + AutoSize，垂直居中 ----
+            chkForceIOValue = new CheckBox
+            {
+                Text = "强制为 True",
+                Anchor = AnchorStyles.None,
+                AutoSize = true,
+                TextAlign = ContentAlignment.MiddleLeft,
+                Margin = new Padding(0)
+            };
+
+            // ---- 应用按钮：Anchor=None + 固定尺寸，垂直居中 ----
+            btnForceIO = new Button
+            {
+                Text = "✅ 应用强制",
+                Anchor = AnchorStyles.None,
+                Size = new Size(125, 34),
+                BackColor = Color.LightYellow,
+                FlatStyle = FlatStyle.Flat,
+                Margin = new Padding(0)
+            };
+
+            // ---- 清除按钮：Anchor=None + 固定尺寸，垂直居中 ----
+            btnClearForceIO = new Button
+            {
+                Text = "🗑️ 清除全部",
+                Anchor = AnchorStyles.None,
+                Size = new Size(135, 34),
+                BackColor = Color.LightGray,
+                FlatStyle = FlatStyle.Flat,
+                Margin = new Padding(0)
+            };
+
+            ioLayout.Controls.Add(lblIOIndex, 0, 0);
+            ioLayout.Controls.Add(numForceIOIndex, 1, 0);
+            ioLayout.Controls.Add(chkForceIOValue, 2, 0);
+            ioLayout.Controls.Add(btnForceIO, 3, 0);
+            ioLayout.Controls.Add(btnClearForceIO, 4, 0);
+
+            grpForceIO.Controls.Add(ioLayout);
+            mainLayout.Controls.Add(grpForceIO, 0, 2);
+
+            tabDevice.Controls.Add(mainLayout);
         }
 
         // ================================================================
@@ -646,7 +805,7 @@ namespace GtsTest.Forms
         }
 
         // ================================================================
-        //  PLC 调试 Tab（重新设计：FlowLayoutPanel + 固定宽度）
+        //  PLC 调试 Tab
         // ================================================================
         private void BuildPlcTab()
         {
@@ -702,7 +861,8 @@ namespace GtsTest.Forms
                 "西门子 S7-1500",
                 "西门子 S7-300",
                 "西门子 S7-400",
-                "西门子 S7-200 Smart"
+                "西门子 S7-200 Smart",
+                "三菱 MC"
             });
             cmbPlcType.SelectedIndex = 0;
             connRow0.Controls.Add(cmbPlcType);

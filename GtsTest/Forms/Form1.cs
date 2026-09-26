@@ -1,8 +1,11 @@
 ﻿using GtsTest.Controls;
+using GtsTest.Core;
 using GtsTest.Presenters;
+using GtsTest.Services.Alarm;
 using GtsTest.Services.Authentication;
 using GtsTest.Services.Data;
-using GtsTest.Services.Mes;
+using GtsTest.Services.Logging;
+using GtsTest.Services.Plc; // 🆕 引入 PlcManager
 using System;
 using System.Collections.Generic;
 using System.Drawing;
@@ -40,36 +43,43 @@ namespace GtsTest
         private GtsPresenter _presenter;
         private readonly IDataRepository _repo;
         private readonly IAuthenticationService _authService;
-        private readonly MesReportService? _mesService;
+        private readonly DeviceManager _deviceManager;
+        private readonly IAlarmManager _alarmManager;
+        private readonly ILogger _logger;
         private bool _isSelectingDevice = false;
 
-        // ---------- 构造函数 ----------
-        public Form1(IDataRepository repo, IAuthenticationService authService, MesReportService mesService = null)
+        // 🆕 构造函数增加 PlcManager 参数
+        public Form1(
+            DeviceManager deviceManager,
+            IDataRepository repo,
+            IAuthenticationService authService,
+            IAlarmManager alarmManager,
+            ILogger logger,
+            PlcManager plcManager)
         {
             InitializeComponent();
 
-            _repo = repo;
-            _authService = authService;
-            _mesService = mesService;
+            _deviceManager = deviceManager ?? throw new ArgumentNullException(nameof(deviceManager));
+            _repo = repo ?? throw new ArgumentNullException(nameof(repo));
+            _authService = authService ?? throw new ArgumentNullException(nameof(authService));
+            _alarmManager = alarmManager ?? throw new ArgumentNullException(nameof(alarmManager));
+            _logger = logger ?? throw new ArgumentNullException(nameof(logger));
 
-            // ---- 创建核心模型和管理器 ----
-            var model = new GtsTest.Core.GtsModel();
-            var deviceManager = new GtsTest.Core.DeviceManager(model, repo, mesService);
-            var logger = new GtsTest.Services.Logging.AppLoggerWrapper();
-            var alarmManager = deviceManager.AlarmManager;
+            var model = _deviceManager.Model;
 
             // ---- 注入到 overviewControl ----
-            overviewControl.SetDeviceManager(deviceManager, alarmManager);
+            overviewControl.SetDeviceManager(_deviceManager, _alarmManager);
 
-            // ---- 创建 Presenter ----
+            // ---- 创建 Presenter 🆕 传入 plcManager ----
             _presenter = new GtsPresenter(
                 this,
                 model,
-                deviceManager,
-                logger,
-                repo,
-                alarmManager,
-                authService
+                _deviceManager,
+                _logger,
+                _repo,
+                _alarmManager,
+                _authService,
+                plcManager
             );
 
             // ---- 初始化生产执行控件的下拉列表 ----
@@ -87,7 +97,7 @@ namespace GtsTest
             }
             workflowExecutionControl.LoadWorkflowPreview();
 
-            // ---- 订阅生产执行控件事件 ----
+            // 订阅生产执行控件事件
             workflowExecutionControl.ExecuteClicked += (s, workflowName) => WorkflowRunClicked?.Invoke(s, workflowName);
             workflowExecutionControl.StopClicked += (s, e) => WorkflowStopClicked?.Invoke(s, e);
             workflowExecutionControl.ResetClicked += (s, e) => ResetDeviceClicked?.Invoke(s, e);
@@ -95,10 +105,10 @@ namespace GtsTest
             workflowExecutionControl.DeviceSelected += (s, deviceId) => DeviceForWorkflowSelected?.Invoke(s, deviceId);
             workflowExecutionControl.BindClicked += (s, e) => BindDeviceWorkflowClicked?.Invoke(s, e);
 
-            // ---- 设置 ListBox 绘制 ----
+            // 设置 ListBox 绘制
             listBoxDevices.DrawItem += ListBoxDevices_DrawItem;
 
-            // ---- 键盘快捷键 ----
+            // 键盘快捷键
             this.KeyPreview = true;
             this.KeyDown += (s, e) =>
             {
@@ -110,146 +120,6 @@ namespace GtsTest
             };
 
             SetupToolTips();
-
-            // ============================================================
-            // ⭐ MES 相关：订阅事件 + 绑定按钮
-            // ============================================================
-            InitMesIntegration();
-        }
-
-        // ============================================================
-        // ⭐ MES 集成初始化
-        // ============================================================
-        private void InitMesIntegration()
-        {
-            if (_mesService == null)
-            {
-                // 没有 MES 服务时，隐藏相关控件
-                if (lblMesPendingCount != null) lblMesPendingCount.Visible = false;
-                if (btnMesRetry != null) btnMesRetry.Visible = false;
-                return;
-            }
-
-            // 订阅待重传数量变化事件
-            _mesService.PendingCountChanged += count =>
-            {
-                if (InvokeRequired)
-                    BeginInvoke(new Action(() => UpdateMesPendingCount(count)));
-                else
-                    UpdateMesPendingCount(count);
-            };
-
-            // 订阅自动重传暂停/恢复事件
-            _mesService.AutoRetryPausedChanged += paused =>
-            {
-                if (InvokeRequired)
-                    BeginInvoke(new Action(() => UpdateMesPausedState(paused)));
-                else
-                    UpdateMesPausedState(paused);
-            };
-
-            // 订阅上报失败事件（4xx 客户端错误需要弹窗提示）
-            _mesService.ReportFailed += (failType, msg) =>
-            {
-                if (failType == MesFailureType.ClientError)
-                {
-                    if (InvokeRequired)
-                        BeginInvoke(new Action(() => MessageBox.Show(msg, "MES 上报异常", MessageBoxButtons.OK, MessageBoxIcon.Warning)));
-                    else
-                        MessageBox.Show(msg, "MES 上报异常", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                }
-            };
-
-            // 绑定手动重传按钮
-            if (btnMesRetry != null)
-            {
-                btnMesRetry.Click += async (s, e) =>
-                {
-                    if (_mesService == null || !_mesService.IsEnabled)
-                    {
-                        MessageBox.Show("MES 服务未启用", "提示", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                        return;
-                    }
-
-                    if (MessageBox.Show("确定要手动触发 MES 重传吗？\n（将尝试重传所有待重传数据）",
-                        "确认重传", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
-                        return;
-
-                    btnMesRetry.Enabled = false;
-                    btnMesRetry.Text = "⏳ 重传中...";
-                    try
-                    {
-                        int successCount = await _mesService.ForceRetryAsync();
-                        if (successCount < 0)
-                            MessageBox.Show("已有重传任务在进行，请稍候", "提示", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                        else if (successCount == 0)
-                            MessageBox.Show("待重传表为空，无需重传", "提示", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                        else
-                            MessageBox.Show($"重传成功 {successCount} 条", "提示", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                    }
-                    finally
-                    {
-                        btnMesRetry.Enabled = true;
-                        btnMesRetry.Text = "📤 重传MES";
-                    }
-                };
-            }
-
-            // 初始化显示
-            if (_mesService.IsEnabled)
-            {
-                AppendOperationLog($"[{DateTime.Now:HH:mm:ss}] ✅ MES 上报服务已启用: {_mesService.ApiUrl}");
-                UpdateMesPendingCount(0);
-            }
-            else
-            {
-                AppendOperationLog($"[{DateTime.Now:HH:mm:ss}] ℹ️ MES 上报服务未启用");
-                if (lblMesPendingCount != null) lblMesPendingCount.Text = "MES未启用";
-            }
-        }
-
-        // ⭐ 更新待重传数量标签
-        private void UpdateMesPendingCount(int count)
-        {
-            if (lblMesPendingCount == null || lblMesPendingCount.IsDisposed) return;
-
-            if (_mesService == null || !_mesService.IsEnabled)
-            {
-                lblMesPendingCount.Text = "MES未启用";
-                lblMesPendingCount.ForeColor = Color.Gray;
-                return;
-            }
-
-            if (_mesService.IsAutoRetryPaused)
-            {
-                lblMesPendingCount.Text = $"MES待重传: {count} (已暂停)";
-                lblMesPendingCount.ForeColor = Color.Red;
-            }
-            else if (count > 0)
-            {
-                lblMesPendingCount.Text = $"MES待重传: {count}";
-                lblMesPendingCount.ForeColor = Color.Orange;
-            }
-            else
-            {
-                lblMesPendingCount.Text = "MES待重传: 0";
-                lblMesPendingCount.ForeColor = Color.LightGreen;
-            }
-        }
-
-        // ⭐ 更新自动重传暂停状态
-        private void UpdateMesPausedState(bool paused)
-        {
-            if (paused)
-            {
-                AppendOperationLog($"[{DateTime.Now:HH:mm:ss}] ⚠️ MES 自动重传已暂停（待重传超过阈值）");
-            }
-            else
-            {
-                AppendOperationLog($"[{DateTime.Now:HH:mm:ss}] ✅ MES 自动重传已恢复");
-            }
-            // 刷新标签颜色
-            UpdateMesPendingCount(_mesService?.PendingCount ?? 0);
         }
 
         // ==================== 实现 IGtsView ====================
@@ -300,9 +170,7 @@ namespace GtsTest
         public string GetSelectedDeviceId()
         {
             if (InvokeRequired)
-            {
                 return (string)Invoke(new Func<string>(GetSelectedDeviceId));
-            }
 
             if (listBoxDevices.SelectedItem is DeviceListItem item)
                 return item.DeviceId;
@@ -312,18 +180,14 @@ namespace GtsTest
         public string GetSelectedDeviceName()
         {
             if (InvokeRequired)
-            {
                 return (string)Invoke(new Func<string>(GetSelectedDeviceName));
-            }
             return workflowExecutionControl?.GetSelectedDeviceName() ?? "";
         }
 
         public string GetSelectedWorkflowName()
         {
             if (InvokeRequired)
-            {
                 return (string)Invoke(new Func<string>(GetSelectedWorkflowName));
-            }
             return workflowExecutionControl?.GetSelectedWorkflowName() ?? "";
         }
 
@@ -347,37 +211,91 @@ namespace GtsTest
             }
         }
 
+        // ---------- 状态机状态更新 ----------
+        public void UpdateDeviceState(string deviceId, DeviceState state, string reason)
+        {
+            if (InvokeRequired)
+            {
+                BeginInvoke(new Action(() => UpdateDeviceState(deviceId, state, reason)));
+                return;
+            }
+
+            for (int i = 0; i < listBoxDevices.Items.Count; i++)
+            {
+                if (listBoxDevices.Items[i] is DeviceListItem item && item.DeviceId == deviceId)
+                {
+                    item.State = state;
+                    listBoxDevices.Items[i] = item;
+                    listBoxDevices.Invalidate();
+                    break;
+                }
+            }
+
+            if (!string.IsNullOrEmpty(reason))
+            {
+                AppLogger.Debug($"[UI] 设备 {deviceId} 状态 → {state} ({reason})", "UI");
+            }
+        }
+
         public void UpdateDeviceProduction(string deviceId, int current, int target) { }
         public void UpdateDeviceStep(string deviceId, string step) { }
         public void UpdateDeviceData(string deviceId, object data) { }
         public void UpdateGlobalStats(int onlineCount, int totalCount, int totalProduction) { }
 
-        public void UpdateStatusBar(string deviceName, bool isOnline, bool servoOn,
+        // ================================================================
+        // 状态栏（含 DeviceState）
+        // ================================================================
+        public void UpdateStatusBar(string deviceName, bool isOnline, DeviceState state, bool servoOn,
             string limitStatus, bool modbusConnected, string currentStep,
             int watchdogRemainingMs, bool watchdogTimeout)
         {
             if (InvokeRequired)
             {
-                BeginInvoke(new Action(() => UpdateStatusBar(deviceName, isOnline, servoOn,
+                BeginInvoke(new Action(() => UpdateStatusBar(deviceName, isOnline, state, servoOn,
                     limitStatus, modbusConnected, currentStep, watchdogRemainingMs, watchdogTimeout)));
                 return;
             }
 
             var items = statusStrip.Items;
-            if (items.Count >= 6)
+            if (items.Count < 6) return;
+
+            // ---- 0. 设备名 + 状态机状态 + 在线状态 ----
+            string stateText = GetStateText(state);
+            Color stateColor = GetStateColor(state);
+            items[0].Text = $"设备: {deviceName} [{stateText}] {(isOnline ? "●在线" : "○离线")}";
+            items[0].ForeColor = isOnline ? stateColor : Color.Red;
+
+            // ---- 1. 伺服 ----
+            items[1].Text = servoOn ? "伺服: 已使能" : "伺服: 未使能";
+            items[1].ForeColor = servoOn ? Color.Green : Color.Orange;
+
+            // ---- 2. 限位 ----
+            items[2].Text = $"限位: {limitStatus}";
+            items[2].ForeColor = limitStatus.Contains("限位") ? Color.Red : Color.Green;
+
+            // ---- 3. 看门狗 ----
+            if (watchdogTimeout)
             {
-                items[0].Text = $"设备: {deviceName} {(isOnline ? "●在线" : "○离线")}";
-                items[0].ForeColor = isOnline ? Color.Green : Color.Red;
-                items[1].Text = servoOn ? "伺服: 已使能" : "伺服: 未使能";
-                items[1].ForeColor = servoOn ? Color.Green : Color.Orange;
-                items[2].Text = $"限位: {limitStatus}";
-                items[2].ForeColor = limitStatus.Contains("限位") ? Color.Red : Color.Green;
-                items[3].Text = watchdogTimeout ? "看门狗: 超时!" : $"看门狗: 正常 ({watchdogRemainingMs}ms)";
-                items[3].ForeColor = watchdogTimeout ? Color.Red : Color.Green;
-                items[4].Text = modbusConnected ? "Modbus: 已连接" : "Modbus: 未连接";
-                items[4].ForeColor = modbusConnected ? Color.Green : Color.Red;
-                items[5].Text = $"当前指令: {currentStep}";
+                items[3].Text = "看门狗: 超时!";
+                items[3].ForeColor = Color.Red;
             }
+            else if (watchdogRemainingMs <= 0)
+            {
+                items[3].Text = "看门狗: --";
+                items[3].ForeColor = Color.Gray;
+            }
+            else
+            {
+                items[3].Text = $"看门狗: 正常 ({watchdogRemainingMs}ms)";
+                items[3].ForeColor = Color.Green;
+            }
+
+            // ---- 4. Modbus ----
+            items[4].Text = modbusConnected ? "Modbus: 已连接" : "Modbus: 未连接";
+            items[4].ForeColor = modbusConnected ? Color.Green : Color.Red;
+
+            // ---- 5. 当前指令 ----
+            items[5].Text = $"当前指令: {currentStep}";
         }
 
         public void UpdateAlarmList(IEnumerable<AlarmRecord> alarms) { }
@@ -465,10 +383,6 @@ namespace GtsTest
             btnResetAlarm.Enabled = isLoggedIn;
             btnEmergencyStop.Enabled = true;
 
-            // ⭐ MES 手动重传按钮需要登录后才能使用
-            if (btnMesRetry != null)
-                btnMesRetry.Enabled = isLoggedIn;
-
             if (isLoggedIn)
             {
                 lblUserInfo.Text = $"👤 {role}";
@@ -489,8 +403,6 @@ namespace GtsTest
             toolTip.SetToolTip(btnResetAlarm, "确认并解决所有设备的当前活动报警\n（报警已处理后的确认操作）");
             toolTip.SetToolTip(btnResetDevice, "重置选中设备的工作流状态\n• 软复位：从断点继续，保留产量\n• 硬复位：产量归零，从头开始");
             toolTip.SetToolTip(btnSystemConfig, "打开系统配置中心（工程师/管理员权限）");
-            if (btnMesRetry != null)
-                toolTip.SetToolTip(btnMesRetry, "手动触发 MES 待重传数据上报\n（4xx 错误和超出重试次数的数据会被跳过）");
         }
 
         public void ShowMessage(string text, string caption, MessageType type)
@@ -510,6 +422,7 @@ namespace GtsTest
             return MessageBox.Show(text, caption, MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes;
         }
 
+        // ---------- 设备列表绘制：圆点 + 状态文本 ----------
         private void ListBoxDevices_DrawItem(object sender, DrawItemEventArgs e)
         {
             if (e.Index < 0) return;
@@ -517,17 +430,61 @@ namespace GtsTest
 
             if (listBoxDevices.Items[e.Index] is not DeviceListItem item) return;
 
-            Color statusColor = item.IsOnline ? Color.Green : Color.Red;
+            // 圆点颜色：在线/离线
+            Color onlineColor = item.IsOnline ? Color.Green : Color.Red;
 
-            using (var brush = new SolidBrush(e.ForeColor))
-            using (var statusBrush = new SolidBrush(statusColor))
+            // 状态机状态文本 + 颜色
+            string stateText = GetStateText(item.State);
+            Color stateColor = GetStateColor(item.State);
+
+            // 1. 绘制在线/离线圆点
+            using (var dotBrush = new SolidBrush(onlineColor))
             {
-                e.Graphics.FillEllipse(statusBrush, e.Bounds.X + 5, e.Bounds.Y + 5, 10, 10);
-                e.Graphics.DrawString(item.Name, e.Font, brush, e.Bounds.X + 22, e.Bounds.Y + 2);
+                e.Graphics.FillEllipse(dotBrush, e.Bounds.X + 5, e.Bounds.Y + 5, 10, 10);
+            }
+
+            // 2. 绘制设备名（默认色）
+            float nameX = e.Bounds.X + 22;
+            using (var nameBrush = new SolidBrush(e.ForeColor))
+            {
+                e.Graphics.DrawString(item.Name, e.Font, nameBrush, nameX, e.Bounds.Y + 2);
+            }
+
+            // 3. 在名字后面绘制状态文本（状态色）
+            SizeF nameSize = e.Graphics.MeasureString(item.Name, e.Font);
+            using (var stateBrush = new SolidBrush(stateColor))
+            {
+                e.Graphics.DrawString($" [{stateText}]", e.Font, stateBrush,
+                    nameX + nameSize.Width, e.Bounds.Y + 2);
             }
 
             e.DrawFocusRectangle();
         }
+
+        // ================================================================
+        // 状态机状态 → 显示文本 / 颜色
+        // ================================================================
+        internal static string GetStateText(DeviceState state) => state switch
+        {
+            DeviceState.Idle => "空闲",
+            DeviceState.Running => "运行中",
+            DeviceState.Paused => "暂停",
+            DeviceState.Error => "故障",
+            DeviceState.EmergencyStop => "急停",
+            DeviceState.Disconnected => "断开",
+            _ => state.ToString()
+        };
+
+        internal static Color GetStateColor(DeviceState state) => state switch
+        {
+            DeviceState.Idle => Color.Gray,
+            DeviceState.Running => Color.Green,
+            DeviceState.Paused => Color.Orange,
+            DeviceState.Error => Color.Red,
+            DeviceState.EmergencyStop => Color.DarkRed,
+            DeviceState.Disconnected => Color.DimGray,
+            _ => Color.Black
+        };
 
         protected override void Dispose(bool disposing)
         {
@@ -535,7 +492,6 @@ namespace GtsTest
             {
                 components?.Dispose();
                 _presenter = null;
-                _mesService?.Dispose();
             }
             base.Dispose(disposing);
         }

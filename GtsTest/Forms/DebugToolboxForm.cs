@@ -24,18 +24,18 @@ namespace GtsTest.Forms
         private readonly IAlarmManager _alarmManager;
         private readonly IDataRepository _repo;
         private readonly IAuthenticationService _authService;
+        private readonly PlcManager _plcManager;
 
-        private DeviceRuntime _currentDevice;
+        private DeviceRuntime? _currentDevice;
         private readonly string _currentUser;
         private readonly long _currentUserId;
 
-        // ⭐ 串口调试
+        // 串口调试
         private SerialPortManager? _serialManager;
         private ISerialPortDriver? _serialDriver;
         private long _serialRecvBytes = 0;
 
-        // ⭐ PLC 调试
-        private PlcManager? _plcManager;
+        // PLC 调试
         private IPlcClient? _plcClient;
 
         public DebugToolboxForm(
@@ -43,7 +43,8 @@ namespace GtsTest.Forms
             GtsModel model,
             IAlarmManager alarmManager,
             IDataRepository repo,
-            IAuthenticationService authService)
+            IAuthenticationService authService,
+            PlcManager plcManager)
         {
             InitializeComponent();
 
@@ -52,6 +53,7 @@ namespace GtsTest.Forms
             _alarmManager = alarmManager;
             _repo = repo;
             _authService = authService;
+            _plcManager = plcManager;
 
             var user = SessionManager.CurrentUser;
             _currentUser = user?.Username ?? "未登录";
@@ -96,8 +98,11 @@ namespace GtsTest.Forms
             RefreshSerialPortList();
 
             // PLC 调试初始化
-            _plcManager = new PlcManager();
             BindPlcEvents();
+
+            // IO 强制模拟
+            btnForceIO.Click += BtnForceIO_Click;
+            btnClearForceIO.Click += BtnClearForceIO_Click;
 
             AppLogger.Info($"调试工具箱已打开，用户: {_currentUser}", "DebugToolbox");
         }
@@ -115,7 +120,7 @@ namespace GtsTest.Forms
                 cmbDevice.SelectedIndex = 0;
         }
 
-        private void CmbDevice_SelectedIndexChanged(object sender, EventArgs e)
+        private void CmbDevice_SelectedIndexChanged(object? sender, EventArgs e)
         {
             var name = cmbDevice.SelectedItem?.ToString();
             if (string.IsNullOrEmpty(name)) return;
@@ -200,7 +205,7 @@ namespace GtsTest.Forms
             }
         }
 
-        private void TimerRefresh_Tick(object sender, EventArgs e)
+        private void TimerRefresh_Tick(object? sender, EventArgs e)
         {
             if (this.IsDisposed) return;
             UpdateDeviceInfo();
@@ -216,6 +221,33 @@ namespace GtsTest.Forms
             }
             lblVisionStatus.Text = message;
             lblVisionStatus.ForeColor = color;
+        }
+
+        // ================================================================
+        //  🆕 IO 强制模拟
+        // ================================================================
+        private void BtnForceIO_Click(object? sender, EventArgs e)
+        {
+            if (_currentDevice == null)
+            {
+                MessageBox.Show("请先选择设备", "提示", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            int ioIndex = (int)numForceIOIndex.Value;
+            bool forceValue = chkForceIOValue.Checked;
+
+            _currentDevice.ForcedIOs[ioIndex] = forceValue;
+            AppLogger.Info($"🔧 [调试] 强制 IO[{ioIndex}] = {forceValue}", "DebugToolbox");
+            MessageBox.Show($"已强制 IO[{ioIndex}] = {forceValue}", "强制成功", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+
+        private void BtnClearForceIO_Click(object? sender, EventArgs e)
+        {
+            if (_currentDevice == null) return;
+            _currentDevice.ForcedIOs.Clear();
+            AppLogger.Info("🔧 [调试] 已清除所有 IO 强制状态", "DebugToolbox");
+            MessageBox.Show("已清除所有 IO 强制状态", "提示", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
 
         // ================================================================
@@ -236,10 +268,10 @@ namespace GtsTest.Forms
             return true;
         }
 
-        private void BtnHome_Click(object sender, EventArgs e)
+        private void BtnHome_Click(object? sender, EventArgs e)
         {
             if (!ValidateDevice()) return;
-            short axis = _currentDevice.Config.Axis;
+            short axis = _currentDevice!.Config.Axis;
             int homePos = _currentDevice.Config.HomePosition;
             try
             {
@@ -261,7 +293,7 @@ namespace GtsTest.Forms
             }
         }
 
-        private void BtnMoveAbs_Click(object sender, EventArgs e)
+        private void BtnMoveAbs_Click(object? sender, EventArgs e)
         {
             if (!ValidateDevice()) return;
             if (!int.TryParse(txtTargetPos.Text, out int target))
@@ -269,7 +301,7 @@ namespace GtsTest.Forms
                 MessageBox.Show("请输入有效目标位置", "错误", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
-            short axis = _currentDevice.Config.Axis;
+            short axis = _currentDevice!.Config.Axis;
             double vel = 10, acc = 5;
             double.TryParse(txtJogSpeed.Text, out vel);
             double.TryParse(txtAcc.Text, out acc);
@@ -293,10 +325,10 @@ namespace GtsTest.Forms
             }
         }
 
-        private void BtnJogP_Click(object sender, EventArgs e)
+        private void BtnJogP_Click(object? sender, EventArgs e)
         {
             if (!ValidateDevice()) return;
-            short axis = _currentDevice.Config.Axis;
+            short axis = _currentDevice!.Config.Axis;
             double speed = 10;
             double.TryParse(txtJogSpeed.Text, out speed);
             try
@@ -318,10 +350,10 @@ namespace GtsTest.Forms
             }
         }
 
-        private void BtnJogN_Click(object sender, EventArgs e)
+        private void BtnJogN_Click(object? sender, EventArgs e)
         {
             if (!ValidateDevice()) return;
-            short axis = _currentDevice.Config.Axis;
+            short axis = _currentDevice!.Config.Axis;
             double speed = 10;
             double.TryParse(txtJogSpeed.Text, out speed);
             try
@@ -343,7 +375,7 @@ namespace GtsTest.Forms
             }
         }
 
-        private void BtnStopAxis_Click(object sender, EventArgs e)
+        private void BtnStopAxis_Click(object? sender, EventArgs e)
         {
             if (_currentDevice == null)
             {
@@ -370,10 +402,10 @@ namespace GtsTest.Forms
             }
         }
 
-        private void BtnServoOn_Click(object sender, EventArgs e)
+        private void BtnServoOn_Click(object? sender, EventArgs e)
         {
             if (!ValidateDevice()) return;
-            short axis = _currentDevice.Config.Axis;
+            short axis = _currentDevice!.Config.Axis;
             try
             {
                 short result = _model.GT_AxisOn(axis);
@@ -395,10 +427,10 @@ namespace GtsTest.Forms
             }
         }
 
-        private void BtnServoOff_Click(object sender, EventArgs e)
+        private void BtnServoOff_Click(object? sender, EventArgs e)
         {
             if (!ValidateDevice()) return;
-            short axis = _currentDevice.Config.Axis;
+            short axis = _currentDevice!.Config.Axis;
             try
             {
                 short result = _model.GT_AxisOff(axis);
@@ -420,10 +452,10 @@ namespace GtsTest.Forms
             }
         }
 
-        private void BtnAxisAlarmReset_Click(object sender, EventArgs e)
+        private void BtnAxisAlarmReset_Click(object? sender, EventArgs e)
         {
             if (!ValidateDevice()) return;
-            short axis = _currentDevice.Config.Axis;
+            short axis = _currentDevice!.Config.Axis;
             try
             {
                 short result = _model.GT_ClrSts(axis, 1);
@@ -462,7 +494,7 @@ namespace GtsTest.Forms
             return true;
         }
 
-        private void BtnWriteRegister_Click(object sender, EventArgs e)
+        private void BtnWriteRegister_Click(object? sender, EventArgs e)
         {
             if (!ValidateModbusDevice()) return;
             ushort address = (ushort)numRegAddress.Value;
@@ -506,8 +538,8 @@ namespace GtsTest.Forms
                     return;
                 }
                 bool success = raw.Length == 1
-                    ? _currentDevice.ModbusClient.WriteSingleRegister(address, raw[0])
-                    : _currentDevice.ModbusClient.WriteMultipleRegisters(address, raw);
+                    ? _currentDevice!.ModbusClient.WriteSingleRegister(address, raw[0])
+                    : _currentDevice!.ModbusClient.WriteMultipleRegisters(address, raw);
                 if (success)
                 {
                     AppLogger.Info($"Modbus写寄存器成功: 设备={_currentDevice.Config.Name}, 地址={address}, 类型={dataType}, 值={string.Join(",", values)}", "DebugToolbox");
@@ -526,14 +558,14 @@ namespace GtsTest.Forms
             }
         }
 
-        private void BtnWriteCoil_Click(object sender, EventArgs e)
+        private void BtnWriteCoil_Click(object? sender, EventArgs e)
         {
             if (!ValidateModbusDevice()) return;
             ushort address = (ushort)numCoilAddress.Value;
             bool value = cmbCoilValue.SelectedIndex == 0;
             try
             {
-                bool success = _currentDevice.ModbusClient.WriteSingleCoil(address, value);
+                bool success = _currentDevice!.ModbusClient.WriteSingleCoil(address, value);
                 if (success)
                 {
                     AppLogger.Info($"Modbus写线圈成功: 设备={_currentDevice.Config.Name}, 地址={address}, 值={value}", "DebugToolbox");
@@ -552,14 +584,14 @@ namespace GtsTest.Forms
             }
         }
 
-        private void BtnReadRegister_Click(object sender, EventArgs e)
+        private void BtnReadRegister_Click(object? sender, EventArgs e)
         {
             if (!ValidateModbusDevice()) return;
             ushort address = (ushort)numReadAddress.Value;
             ushort count = (ushort)numReadCount.Value;
             try
             {
-                var result = _currentDevice.ModbusClient.ReadHoldingRegistersWithRaw(address, count);
+                var result = _currentDevice!.ModbusClient.ReadHoldingRegistersWithRaw(address, count);
                 if (result == null)
                 {
                     MessageBox.Show("读取失败", "错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
@@ -581,7 +613,7 @@ namespace GtsTest.Forms
         // ================================================================
         //  设备控制
         // ================================================================
-        private void BtnStartDevice_Click(object sender, EventArgs e)
+        private void BtnStartDevice_Click(object? sender, EventArgs e)
         {
             if (_currentDevice == null)
             {
@@ -609,7 +641,7 @@ namespace GtsTest.Forms
             }
         }
 
-        private void BtnStopDevice_Click(object sender, EventArgs e)
+        private void BtnStopDevice_Click(object? sender, EventArgs e)
         {
             if (_currentDevice == null)
             {
@@ -637,7 +669,7 @@ namespace GtsTest.Forms
             }
         }
 
-        private void BtnDeviceConfig_Click(object sender, EventArgs e)
+        private void BtnDeviceConfig_Click(object? sender, EventArgs e)
         {
             if (_currentDevice == null)
             {
@@ -668,7 +700,7 @@ namespace GtsTest.Forms
         // ================================================================
         //  Modbus 连接/断开
         // ================================================================
-        private void BtnConnectModbus_Click(object sender, EventArgs e)
+        private void BtnConnectModbus_Click(object? sender, EventArgs e)
         {
             if (_currentDevice == null)
             {
@@ -705,7 +737,7 @@ namespace GtsTest.Forms
             }
         }
 
-        private void BtnDisconnectModbus_Click(object sender, EventArgs e)
+        private void BtnDisconnectModbus_Click(object? sender, EventArgs e)
         {
             if (_currentDevice == null) return;
             if (_currentDevice.ModbusClient == null) return;
@@ -726,7 +758,7 @@ namespace GtsTest.Forms
         // ================================================================
         //  视觉触发调试
         // ================================================================
-        private async void BtnTriggerVision_Click(object sender, EventArgs e)
+        private async void BtnTriggerVision_Click(object? sender, EventArgs e)
         {
             btnTriggerVision.Enabled = false;
             UpdateVisionStatus("⏳ 正在连接视觉服务器...", Color.Orange);
@@ -808,7 +840,7 @@ namespace GtsTest.Forms
             }
         }
 
-        private void BtnSerialOpen_Click(object sender, EventArgs e)
+        private void BtnSerialOpen_Click(object? sender, EventArgs e)
         {
             if (_serialManager == null) return;
 
@@ -877,7 +909,7 @@ namespace GtsTest.Forms
             AppLogger.Info($"🔌 串口已打开: {portName} @ {config.BaudRate}", "DebugToolbox");
         }
 
-        private void BtnSerialClose_Click(object sender, EventArgs e)
+        private void BtnSerialClose_Click(object? sender, EventArgs e)
         {
             if (_serialDriver != null)
             {
@@ -906,7 +938,7 @@ namespace GtsTest.Forms
             AppLogger.Info("🔌 串口已关闭", "DebugToolbox");
         }
 
-        private void BtnSerialSend_Click(object sender, EventArgs e)
+        private void BtnSerialSend_Click(object? sender, EventArgs e)
         {
             if (_serialDriver == null || !_serialDriver.IsOpen) return;
 
@@ -1007,7 +1039,7 @@ namespace GtsTest.Forms
         }
 
         // ================================================================
-        //  ⭐ PLC 调试
+        //  PLC 调试
         // ================================================================
         private void BindPlcEvents()
         {
@@ -1018,7 +1050,7 @@ namespace GtsTest.Forms
             if (btnPlcClearLog != null) btnPlcClearLog.Click += (s, e) => txtPlcLog.Clear();
         }
 
-        private void BtnPlcConnect_Click(object sender, EventArgs e)
+        private void BtnPlcConnect_Click(object? sender, EventArgs e)
         {
             if (_plcManager == null) return;
 
@@ -1029,6 +1061,7 @@ namespace GtsTest.Forms
                 3 => PlcType.SiemensS300,
                 4 => PlcType.SiemensS400,
                 5 => PlcType.SiemensS200Smart,
+                6 => PlcType.MitsubishiMc, // 🆕 三菱
                 _ => PlcType.Simulated
             };
 
@@ -1074,7 +1107,7 @@ namespace GtsTest.Forms
             }
         }
 
-        private void BtnPlcDisconnect_Click(object sender, EventArgs e)
+        private void BtnPlcDisconnect_Click(object? sender, EventArgs e)
         {
             if (_plcClient != null)
             {
@@ -1098,7 +1131,7 @@ namespace GtsTest.Forms
             AppendPlcLog("🔌 PLC 已断开");
         }
 
-        private void BtnPlcRead_Click(object sender, EventArgs e)
+        private void BtnPlcRead_Click(object? sender, EventArgs e)
         {
             if (_plcClient == null || !_plcClient.IsConnected)
             {
@@ -1142,7 +1175,7 @@ namespace GtsTest.Forms
                 AppendPlcLog($"⚠️ 读取失败 [{addr}]");
         }
 
-        private void BtnPlcWrite_Click(object sender, EventArgs e)
+        private void BtnPlcWrite_Click(object? sender, EventArgs e)
         {
             if (_plcClient == null || !_plcClient.IsConnected)
             {
@@ -1220,7 +1253,7 @@ namespace GtsTest.Forms
         // ================================================================
         //  窗体关闭
         // ================================================================
-        private void DebugToolboxForm_FormClosing(object sender, FormClosingEventArgs e)
+        private void DebugToolboxForm_FormClosing(object? sender, FormClosingEventArgs e)
         {
             timerRefresh.Stop();
 
@@ -1249,9 +1282,7 @@ namespace GtsTest.Forms
                     _plcClient.ConnectionStateChanged -= OnPlcConnectionChanged;
                     _plcClient.ErrorOccurred -= OnPlcError;
                 }
-                _plcManager?.CloseAll();
-                _plcManager?.Dispose();
-                _plcManager = null;
+                // 注意：不调用 _plcManager.CloseAll()，因为是单例，会影响其他界面
                 _plcClient = null;
             }
             catch { }

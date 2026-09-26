@@ -1,6 +1,7 @@
 ﻿using GtsTest.Core;
 using System;
 using System.Collections.Concurrent;
+using System.Linq;
 
 namespace GtsTest.Services.Plc
 {
@@ -30,6 +31,7 @@ namespace GtsTest.Services.Plc
                 PlcType.SiemensS1200 or PlcType.SiemensS1500 or PlcType.SiemensS300
                     or PlcType.SiemensS400 or PlcType.SiemensS200Smart
                     => new SiemensS7Client(config),
+                PlcType.MitsubishiMc => new MitsubishiPlcClient(config), // 🆕 新增三菱支持
                 _ => new SimulatedPlcClient(config)
             };
 
@@ -51,7 +53,7 @@ namespace GtsTest.Services.Plc
         /// <summary>获取所有 PLC 名称</summary>
         public string[] GetAllNames()
         {
-            return System.Linq.Enumerable.ToArray(_clients.Keys);
+            return _clients.Keys.ToArray();
         }
 
         /// <summary>移除 PLC</summary>
