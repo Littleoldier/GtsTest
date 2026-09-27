@@ -50,6 +50,7 @@
 Modbus 寄存器本身是**无符号 16 位**（0 ~ 65535），但坐标可能是负数。
 
 **写入（服务端 → 寄存器）**：
+
 ```csharp
 double value = -27.34;
 ushort raw = (ushort)(short)Math.Round(value * 100, MidpointRounding.AwayFromZero);
@@ -58,19 +59,20 @@ _registers.WritePoints(1005, new ushort[] { raw });
 ```
 
 **读取（寄存器 → 客户端）**：
+
 ```csharp
 ushort raw = master.ReadHoldingRegisters(slave, 1005, 1)[0];
 short signed = (short)raw;   // 0xF552 → -2734
 double value = signed / 100.0;  // -27.34
 ```
 
-⚠️ **注意**：`NModbus` 返回的 `ushort[]` **已经是寄存器内的原始值**，不要再做字节交换。常见错误是在读取时多交换一次字节：
+**注意**：`NModbus` 返回的 `ushort[]` **已经是寄存器内的原始值**，不要再做字节交换。常见错误是在读取时多交换一次字节：
 
 ```csharp
-// ❌ 错误：多余的字节交换
+// 错误：多余的字节交换
 result = (short)((raw << 8) | (raw >> 8));
 
-// ✅ 正确：直接强转
+// 正确：直接强转
 result = (short)raw;
 ```
 
@@ -78,49 +80,16 @@ result = (short)raw;
 
 ### 4.1 触发拍照流程
 
-```mermaid
-sequenceDiagram
-    autonumber
-    participant Client as GTS 客户端
-    participant Vision as HalconVisionServer
-    participant Camera as 相机
-
-    Note over Client,Vision: 步骤 1：连接
-    Client->>Vision: TCP Connect (503)
-    Vision-->>Client: 连接建立
-
-    Note over Client,Vision: 步骤 2：检查忙状态
-    Client->>Vision: 读线圈 101 (忙状态)
-    Vision-->>Client: 0 (空闲)
-
-    Note over Client,Vision: 步骤 3：写触发信号
-    Client->>Vision: 写线圈 100 = 1
-    Vision->>Vision: 服务端轮询检测到触发 (50ms 内)
-    Vision->>Vision: 清线圈 100 = 0
-    Vision->>Vision: 置忙线圈 101 = 1
-
-    Note over Vision,Camera: 步骤 4：拍照与处理
-    Vision->>Camera: 触发拍照
-    Camera-->>Vision: 图像帧
-    Vision->>Vision: HALCON 图像处理 + 亚像素测量
-    Vision->>Vision: 写入寄存器 1003~1013
-    Vision->>Vision: 清忙线圈 101 = 0
-
-    Note over Client,Vision: 步骤 5：轮询等待结果
-    loop 每 50ms
-        Client->>Vision: 读线圈 101
-        Vision-->>Client: 1 (忙)
-    end
-    Client->>Vision: 读线圈 101
-    Vision-->>Client: 0 (空闲)
-
-    Note over Client,Vision: 步骤 6：读取结果
-    Client->>Vision: 读保持寄存器 1000~1007
-    Vision-->>Client: [0, 0, 0, 2015, 0, 62802, 63924, 1]
-    Client->>Client: 解析：OK, 直径=20.15mm, X=-27.34, Y=-15.76
-
-    Client->>Vision: TCP Disconnect
-```
+| 步骤 | 客户端动作 | 服务端动作 |
+|------|-----------|-----------|
+| 1 | TCP Connect (503) | 接受连接 |
+| 2 | 读线圈 101（忙状态） | 返回 0（空闲） |
+| 3 | 写线圈 100 = 1（触发） | 50ms 内检测到，清 100 = 0，置忙 101 = 1 |
+| 4 | - | 触发相机拍照 → HALCON 处理 → 写入寄存器 1003~1013 → 清忙 101 = 0 |
+| 5 | 每 50ms 轮询读线圈 101 | 返回 1（忙） |
+| 6 | 读到线圈 101 = 0 | 结果已就绪 |
+| 7 | 读保持寄存器 1000~1007 | 返回结果数据 |
+| 8 | TCP Disconnect | 断开 |
 
 ### 4.2 超时与重试策略
 
@@ -132,6 +101,7 @@ sequenceDiagram
 | 读结果寄存器 | 3000 ms | 1 次 |
 
 **超时处理**：
+
 - 连接超时 → 抛异常，工作流暂停
 - 忙状态检查超时 → 抛异常
 - 处理超时 → 抛异常，工作流暂停
@@ -261,3 +231,40 @@ client.Disconnect();
 | **数据格式** | 直径/坐标 × 100 存储，坐标有符号 |
 | **字节序** | 大端（Modbus 标准） |
 | **超时** | 10 秒（可配置） |
+
+## 10. IO 强制模拟（v1.1.0 新增）
+
+调试时可以通过 UI 强制 DI 值，绕过真实硬件读取。
+
+**用途**：
+
+- 现场调试无需连接真实硬件
+- 让工作流中的 `WaitIOCommand` 秒过
+- 便于验证工作流逻辑
+
+**原理**：
+
+```csharp
+// DeviceRuntime.cs
+public Dictionary<int, bool> ForcedIOs { get; set; } = new();
+
+// GtsModel.cs
+public bool ReadDIWithForce(int ioIndex, DeviceRuntime? runtime)
+{
+    // 优先读取强制值
+    if (runtime != null && runtime.ForcedIOs.TryGetValue(ioIndex, out bool forcedValue))
+        return forcedValue;
+
+    // 否则读真实硬件
+    return ReadDI(ioIndex);
+}
+```
+
+**使用方式**：
+
+1. 打开【系统管理】→【调试工具】→【设备控制】
+2. 选择设备
+3. 在【IO 强制模拟】区域填写 IO 索引 + 期望值
+4. 点击【应用强制】
+
+**注意**：强制值仅影响应用层读取，不改变真实硬件状态。

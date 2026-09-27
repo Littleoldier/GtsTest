@@ -4,7 +4,7 @@
 
 系统支持 **REST** 和 **SOAP** 双协议对接 MES 系统，通过 `mes_config.json` 一键切换，无需修改代码。
 
-核心特性：
+**核心特性**：
 
 - **异步队列**：上报数据入 Channel 队列，不阻塞工作流
 - **离线缓存**：上报失败自动缓存到 SQLite
@@ -13,38 +13,32 @@
 - **配置热重载**：运行时切换协议，无需重启
 - **阈值保护**：待重传积压超过阈值时暂停自动重传
 
-## 2. 架构图
+## 2. 架构总览
 
-```mermaid
-graph TB
-    subgraph PROD["产线侧"]
-        DM[DeviceManager<br/>工作流循环]
-        WF[工作流执行完成]
-        WF -->|产量+1| DM
-    end
+系统由 4 个部分构成：
 
-    subgraph MES_SERVICE["MES 服务"]
-        Q[Channel Queue]
-        RS[MesReportService]
-        HM[MesHealthMonitor]
-        DB[(MesPendingRecords<br/>SQLite)]
-    end
+**产线侧**：
 
-    subgraph MES_SERVER["MES 服务端"]
-        REST[REST API]
-        SOAP[SOAP WebService]
-    end
+- `DeviceManager` 工作流循环
+- 工作流执行完成 → 产量 +1 → 调用 `Enqueue`
 
-    DM -->|Enqueue| Q
-    Q -->|ReadAllAsync| RS
-    RS -->|Protocol=REST| REST
-    RS -->|Protocol=SOAP| SOAP
-    RS -.失败.-> DB
-    RS -->|重传| DB
-    HM -.每10s探测.-> REST
-    HM -.每10s探测.-> SOAP
-    HM -->|离线/恢复事件| RS
-```
+**MES 服务侧**：
+
+- `Channel Queue` 异步队列
+- `MesReportService` 上报服务
+- `MesHealthMonitor` 健康监控
+- `MesPendingRecords` SQLite 表（离线缓存）
+
+**MES 服务端**：
+
+- REST API（HTTP POST JSON）
+- SOAP WebService（HTTP POST XML）
+
+**数据流**：
+
+- 工作流 → Enqueue → Channel → MesReportService → MES 服务端
+- 失败 → MesPendingRecords → 定时重传 → MES 服务端
+- MesHealthMonitor 每 10 秒探测 MES 端点，离线时暂停重传
 
 ## 3. 配置说明
 
@@ -154,33 +148,20 @@ public enum MesFailureType
 
 ### 5.3 重传流程
 
-```mermaid
-flowchart TD
-    Start([启动重传循环]) --> CheckEnabled{Enabled?}
-    CheckEnabled -->|否| End([结束])
-    CheckEnabled -->|是| CheckOnline{MES 在线?}
-    CheckOnline -->|否| Sleep[等待下次检查]
-    CheckOnline -->|是| LoadDB[加载待重传记录]
-    LoadDB --> HasData{有数据?}
-    HasData -->|否| Sleep
-    HasData -->|是| CheckThreshold{积压 > 阈值?}
-    CheckThreshold -->|是| Pause[暂停自动重传]
-    CheckThreshold -->|否| ForEach[逐条重传]
-    ForEach --> CheckRetry{重试次数超限?}
-    CheckRetry -->|是| Skip[跳过]
-    CheckRetry -->|否| CheckTime{到了下次重试时间?}
-    CheckTime -->|否| Skip
-    CheckTime -->|是| DoPost[执行上报]
-    DoPost --> Result{成功?}
-    Result -->|是| Delete[删除记录]
-    Result -->|否| Update[更新重试次数]
-    Delete --> Next[下一条]
-    Update --> Next
-    Skip --> Next
-    Next --> ForEach
-    ForEach --> Sleep
-    Sleep --> CheckEnabled
-```
+1. 启动重传循环
+2. 检查 `Enabled` 是否为 true
+3. 检查 MES 是否在线（健康监控状态）
+4. 加载待重传记录（最多 200 条）
+5. 检查待重传数量是否超过阈值
+   - 超过 → 暂停自动重传，等待用户处理
+   - 未超过 → 继续
+6. 逐条处理待重传数据：
+   - 若重试次数超限 → 跳过
+   - 若未到下次重试时间 → 跳过
+   - 否则执行上报
+     - 成功 → 从数据库删除
+     - 失败 → 更新重试次数和下次重试时间
+7. 等待下次循环
 
 ### 5.4 阈值保护
 
@@ -197,30 +178,14 @@ flowchart TD
 
 ### 6.1 工作原理
 
-```mermaid
-sequenceDiagram
-    autonumber
-    participant HM as MesHealthMonitor
-    participant MES as MES 端点
-
-    loop 每 10 秒
-        HM->>MES: HTTP GET (HEAD)
-        alt 响应 < 500
-            MES-->>HM: 2xx/4xx
-            HM->>HM: 连续成功 +1
-            alt 连续成功 ≥ 2 次
-                HM->>HM: 判定"在线"
-                HM-->>HM: 触发 HealthChanged(true)
-            end
-        else 响应 5xx 或超时
-            HM->>HM: 连续失败 +1
-            alt 连续失败 ≥ 3 次
-                HM->>HM: 判定"离线"
-                HM-->>HM: 触发 HealthChanged(false)
-            end
-        end
-    end
-```
+1. 每 10 秒执行一次健康检查
+2. 向 MES 端点发送 HTTP HEAD 请求
+3. 判定逻辑：
+   - 响应码 < 500 → 判定成功
+   - 响应超时或 5xx → 判定失败
+   - 连续成功 2 次 → 判定"在线"
+   - 连续失败 3 次 → 判定"离线"
+4. 状态变化时触发事件 `HealthChanged`
 
 ### 6.2 关键参数
 
@@ -233,11 +198,13 @@ sequenceDiagram
 ### 6.3 状态变化响应
 
 **离线时**：
+
 - 暂停自动重传
 - 上报直接走"离线缓存"分支，不尝试网络请求
 - UI 显示 🔴 MES 离线
 
 **恢复时**：
+
 - 立即触发一次全量重传（不等 30 秒周期）
 - UI 显示 🟢 MES 在线
 
@@ -266,6 +233,7 @@ CREATE INDEX idx_mes_retry ON MesPendingRecords(NextRetryTime);
 ```
 
 **优势**：
+
 - 断电/崩溃后重传数据不丢失
 - 可跨程序重启继续重传
 - 查询/清理方便
@@ -296,7 +264,8 @@ CREATE INDEX idx_mes_retry ON MesPendingRecords(NextRetryTime);
 ### 8.2 HTTP 请求头
 
 **SOAP 1.1**：
-```
+
+```text
 POST / HTTP/1.1
 Host: 127.0.0.1:8080
 Content-Type: text/xml; charset=utf-8
@@ -304,7 +273,8 @@ SOAPAction: "http://tempuri.org/ReportProduction"
 ```
 
 **SOAP 1.2**：
-```
+
+```text
 POST / HTTP/1.1
 Host: 127.0.0.1:8080
 Content-Type: application/soap+xml; charset=utf-8; action="http://tempuri.org/ReportProduction"
@@ -347,6 +317,7 @@ if __name__ == '__main__':
 ```
 
 **运行**：
+
 ```bash
 pip install flask
 python mes_rest_server.py
@@ -373,7 +344,7 @@ class SoapHandler(http.server.BaseHTTPRequestHandler):
         params = {child.tag.split('}')[-1]: child.text for child in method_node}
 
         barcode = params.get('barcode', '')
-        print(f"[MES SOAP] ✅ 收到上报: {barcode}")
+        print(f"[MES SOAP] 收到上报: {barcode}")
 
         response_xml = f'''<?xml version="1.0" encoding="utf-8"?>
 <soap:Envelope xmlns:soap="{SOAP_NS}">
@@ -409,8 +380,8 @@ if __name__ == '__main__':
 | **一直缓存在离线队列** | MES 端点 URL 错误 | 用 `curl` 验证端点可访问 |
 | **4xx 错误** | 字段名/格式不匹配 | 检查 MES 服务端的接口定义 |
 | **字段名不匹配** | SOAP 参数名不同 | 修改 `PostToMesBySoapAsync` 中的参数字典 |
-| **待重传数一直涨** | MES 宕机超过阈值 | 修复 MES，点击"📤 重传 MES"手动触发 |
+| **待重传数一直涨** | MES 宕机超过阈值 | 修复 MES，点击"重传 MES"手动触发 |
 
 ## 11. 简历亮点表述
 
-> ✅ **MES 双协议对接**：基于 `HttpClient` 手写 SOAP 1.1/1.2 客户端（不依赖 WCF），支持 SOAP Fault 解析；通过 `mes_config.json` 一键切换 REST/SOAP 协议；配合**异步队列（Channel）+ 离线缓存（SQLite）+ 分级重传（超时/5xx/4xx 差异化策略）+ 健康监控看门狗**机制，保证产线数据零丢失。
+> **MES 双协议对接**：基于 `HttpClient` 手写 SOAP 1.1/1.2 客户端（不依赖 WCF），支持 SOAP Fault 解析；通过 `mes_config.json` 一键切换 REST/SOAP 协议；配合**异步队列（Channel）+ 离线缓存（SQLite）+ 分级重传（超时/5xx/4xx 差异化策略）+ 健康监控看门狗**机制，保证产线数据零丢失。

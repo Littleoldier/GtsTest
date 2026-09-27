@@ -316,8 +316,8 @@
 ### 4. 克隆与编译
 
 ```bash
-git clone https://github.com/Littleoldier/gts-production-line.git
-cd gts-production-line
+git clone https://github.com/Littleoldier/GtsTest.git
+cd GtsTest
 dotnet restore
 dotnet build -c Release
 dotnet run --project GtsTest.csproj
